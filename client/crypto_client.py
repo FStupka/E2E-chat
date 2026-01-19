@@ -54,22 +54,27 @@ def generate_keypair(username: str):
     print(response, response.text)
     if response.status_code != 200:
         return None
+    # ask for password
+    password = "password123"
+
 # Serialize and save the private key
     with open(privatekey_storage/ f"{username}_private.pem", "wb") as priv_file:
         priv_file.write(
             private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption()  # Change if you want password encryption
+                encryption_algorithm=serialization.BestAvailableEncryption(password.encode())  # Change if you want password encryption
             )
         )
     print(f"RSA 4096-bit key pair generated and private saved to '{username}_private.pem'")
 
 def login(username: str):
+    # ask for password
+    password = "password1234"
     with open(privatekey_storage / f"{username}_private.pem", "rb") as key_file:
         private_key : RSAPrivateKey = serialization.load_pem_private_key(
             key_file.read(),
-            password=None  # or provide a password if the key is encrypted
+            password=password.encode()  # or provide a password if the key is encrypted
         )
         # part 1
         payload = {
@@ -81,8 +86,8 @@ def login(username: str):
             print(response.text, response.status_code)
             return
         data = response.json()
-        api_key = data.get("api_key")
-        api_key = private_key.decrypt(base64_to_bytes(api_key),padding.OAEP(
+        encrypted_api_key = data.get("api_key")
+        api_key = private_key.decrypt(base64_to_bytes(encrypted_api_key),padding.OAEP(
                     mgf=padding.MGF1(algorithm=hashes.SHA256()),
                     algorithm=hashes.SHA256(),
                     label=None
@@ -112,7 +117,17 @@ def login(username: str):
             return
         data = response.json()
         public_key = serialization.load_pem_public_key(data.get("public_key", "").encode())
-        return (private_key, public_key)
+        return (private_key, public_key, api_key)
+
+def logout(api_key):
+    headers = {
+        "x-api-key": api_key
+    }
+    response = requests.post(f"{SERVER_URL}/logout", headers=headers, verify=server_certificate_path)
+    if response.status_code != 200:
+        print(response.text, response.status_code)
+        return
+    print("logout successful")
 
 def send_message(private_key: RSAPrivateKey, public_key: RSAPublicKey, timestamp: datetime, sender: str, recipient: str, message: bytes):
     # sign
@@ -223,8 +238,11 @@ def receive_message(
     return message
 
 if __name__ == "__main__":
-    #generate_keypair("test1")
-    priv, pub = login("test1")
+    #generate_keypair("test")
+    priv, pub, api_key = login("test")
+    #ap = "fi8U5UqgAh7FAClapWUuDvgjNkRcddA_Mtg22RZ1Nbs="
+    #print(api_key)
+    #logout(ap)
     #timestamp = datetime.now(timezone.utc)
     #pack = send_message(priv, pub, timestamp,"test1", "test1", b"hello")
     #ret = receive_message(priv, pub, timestamp,"test1", "test1", pack)

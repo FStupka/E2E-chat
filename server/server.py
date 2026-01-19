@@ -123,7 +123,7 @@ class AuthenticateData(BaseModel):
     signature: str
 
 @app.post("/authenticate")
-def login_step2(data: AuthenticateData, db: Session = Depends(get_db)):
+def authenticate(data: AuthenticateData, db: Session = Depends(get_db)):
     user = db.query(User).filter_by(username=data.username).first()
     if not user:
         raise HTTPException(404, "User not found")
@@ -177,6 +177,13 @@ def get_current_user(x_api_key: str = Header(...), db: Session = Depends(get_db)
     db.commit()
     return user
 
+# logout
+
+@app.post("/logout")
+def logout(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    current_user.api_key_expires = datetime.now(timezone.utc)
+    db.commit()
+    return {"status": "logged out"}
 
 # =========================
 # Send Message
