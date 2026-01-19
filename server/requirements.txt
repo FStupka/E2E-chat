@@ -1,0 +1,6 @@
+sqlalchemy
+cryptography
+fastapi
+psycopg2-binary
+dotenv
+uvicorn
