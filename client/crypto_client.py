@@ -70,7 +70,7 @@ def generate_keypair(username: str):
 
 def login(username: str):
     # ask for password
-    password = "password1234"
+    password = "password123"
     with open(privatekey_storage / f"{username}_private.pem", "rb") as key_file:
         private_key : RSAPrivateKey = serialization.load_pem_private_key(
             key_file.read(),
@@ -238,10 +238,11 @@ def receive_message(
     return message
 
 if __name__ == "__main__":
-    #generate_keypair("test")
+    generate_keypair("admin")
     priv, pub, api_key = login("test")
     #ap = "fi8U5UqgAh7FAClapWUuDvgjNkRcddA_Mtg22RZ1Nbs="
     #print(api_key)
+    logout(api_key)
     #logout(ap)
     #timestamp = datetime.now(timezone.utc)
     #pack = send_message(priv, pub, timestamp,"test1", "test1", b"hello")
