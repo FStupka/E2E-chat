@@ -96,14 +96,14 @@ CTRL-c in terminal with server
 deactivate
 ```
 
-### 3. Shut down containers
+### 3a. Shut down containers
 ```bash
 docker compose down
 ```
 
-### 4. Remove containers with volumes (not required)
+### 3b. Shut down containers and remove volumes (not required)
 ```bash
-docker compose rm -v
+docker compose down -v
 ```
 
 ## Termination instructions Client
