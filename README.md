@@ -18,9 +18,9 @@ Run the following commands to generate SSL certificates, populate the environmen
 cd server
 ```
 
-### 2. Create a private key and self-signed certificate
+### 2. Create ssl infractructure
 ```bash
-openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -addext "subjectAltName=DNS:localhost"
+bash ssl_infra.sh
 ```
 ### 3. Copy and populate the .env file
 ```bash

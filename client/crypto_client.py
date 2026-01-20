@@ -3,7 +3,9 @@ import os
 from datetime import timezone, datetime
 from pathlib import Path
 
+from cryptography import x509
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat._oid import NameOID
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
@@ -20,8 +22,10 @@ load_dotenv()  # by default, it looks for a file named ".env" in the current dir
 # Access environment variables
 server_address = os.getenv("SERVER_ADDRESS")
 server_port = int(os.getenv("SERVER_PORT"))
-server_certificate_path = os.getenv("SERVER_CERTIFICATE_PATH")
 privatekey_storage = Path(os.getenv("PRIVATEKEY_STORAGE"))
+
+server_transport_cert_path = os.getenv("SERVER_TRANSPORT_CERTIFICATE_PATH")
+server_storage_cert_path = Path(os.getenv("SERVER_STORAGE_CERTIFICATE_PATH"))
 
 SERVER_URL= f"https://{server_address}:{server_port}"
 
@@ -41,19 +45,26 @@ def generate_keypair(username: str):
 # Serialize
     public_key = private_key.public_key()
 
+    csr = x509.CertificateSigningRequestBuilder().subject_name(x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, u"IT"),
+        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Sardinia"),
+        x509.NameAttribute(NameOID.LOCALITY_NAME, "Cagliari"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "E2E-chat"),
+        x509.NameAttribute(NameOID.COMMON_NAME, f"{username}"),
+    ])).sign(private_key, hashes.SHA256())
 
-    public_key_pem_str = public_key.public_bytes(
+    csr_pem_str = csr.public_bytes(
     encoding=serialization.Encoding.PEM,
-    format=serialization.PublicFormat.SubjectPublicKeyInfo
     ).decode('utf-8')
     payload = {
         "username": username,
-        "public_key": public_key_pem_str
+        "csr": csr_pem_str
     }
-    response = requests.post(f"{SERVER_URL}/register", json=payload, verify=server_certificate_path)
+    response = requests.post(f"{SERVER_URL}/register", json=payload, verify=server_transport_cert_path)
     print(response, response.text)
     if response.status_code != 200:
         return None
+    print(response.text)
     # ask for password
     password = "password123"
 
@@ -81,7 +92,7 @@ def login(username: str):
             "username": username
         }
 
-        response = requests.post(f"{SERVER_URL}/get_api", json=payload, verify=server_certificate_path)
+        response = requests.post(f"{SERVER_URL}/get_api", json=payload, verify=server_transport_cert_path)
         if response.status_code != 200:
             print(response.text, response.status_code)
             return
@@ -111,7 +122,7 @@ def login(username: str):
             "api_key": api_key,
             "signature": signature
         }
-        response = requests.post(f"{SERVER_URL}/authenticate", json=payload, verify=server_certificate_path)
+        response = requests.post(f"{SERVER_URL}/authenticate", json=payload, verify=server_transport_cert_path)
         if response.status_code != 200:
             print(response.text, response.status_code)
             return
@@ -123,7 +134,7 @@ def logout(api_key):
     headers = {
         "x-api-key": api_key
     }
-    response = requests.post(f"{SERVER_URL}/logout", headers=headers, verify=server_certificate_path)
+    response = requests.post(f"{SERVER_URL}/logout", headers=headers, verify=server_transport_cert_path)
     if response.status_code != 200:
         print(response.text, response.status_code)
         return
@@ -238,7 +249,7 @@ def receive_message(
     return message
 
 if __name__ == "__main__":
-    #generate_keypair("admin")
+    generate_keypair("admin")
     priv, pub, api_key = login("admin")
     #ap = "fi8U5UqgAh7FAClapWUuDvgjNkRcddA_Mtg22RZ1Nbs="
     #print(api_key)
