@@ -430,7 +430,10 @@ async def users(current_user: User = Depends(get_current_user), db: AsyncSession
         .filter(User.id != current_user.id)
         .order_by(User.username)
     )
-    users = result.all()
+    users = result = await db.execute(
+    select(User).filter(User.id != current_user.id).order_by(User.username))
+    users = result.scalars().all()
+
     return [
         {
             "id": str(u.id),
@@ -439,7 +442,7 @@ async def users(current_user: User = Depends(get_current_user), db: AsyncSession
         for u in users
     ]
 
-@app.get("users/{user_id}")
+@app.get("/users/{user_id}")
 async def user_by_username(target_user: User = Depends(get_target_user), current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(User)
