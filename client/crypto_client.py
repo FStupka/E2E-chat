@@ -26,7 +26,9 @@ privatekey_storage = Path(os.getenv("PRIVATEKEY_STORAGE"))
 
 server_transport_cert_path = os.getenv("SERVER_TRANSPORT_CERTIFICATE_PATH")
 server_storage_cert_path = Path(os.getenv("SERVER_STORAGE_CERTIFICATE_PATH"))
-
+with open(server_storage_cert_path, "rb") as f:
+    data = f.read()
+server_storage_cert = x509.load_pem_x509_certificate(data)
 SERVER_URL= f"https://{server_address}:{server_port}"
 
 def base64_to_bytes(string):
@@ -34,6 +36,25 @@ def base64_to_bytes(string):
 
 def bytes_to_base64(data):
     return base64.urlsafe_b64encode(data).decode()
+
+def certificate_validator(cert: x509.Certificate, username: str) -> bool:
+    storage_public_key = server_storage_cert.public_key()
+    time_now = datetime.now(timezone.utc)
+    if server_storage_cert.subject != cert.issuer:
+        return False
+    if cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value != username:
+        return False
+    if cert.not_valid_before > time_now or cert.not_valid_after < time_now:
+        return False
+    try:
+        storage_public_key.verify(cert.signature,
+                          cert.tbs_certificate_bytes,
+                          padding.PKCS1v15(),
+                          hashes.SHA256())
+    except InvalidSignature:
+        return False
+    return True
+
 
 def generate_keypair(username: str):
 # Generate RSA 4096-bit key pair
@@ -159,7 +180,7 @@ def send_message(private_key: RSAPrivateKey, public_key: RSAPublicKey, timestamp
     cipher = Cipher(algorithms.AES(aes_key), modes.CTR(nonce), backend=default_backend())
     encryptor = cipher.encryptor()
     # encryption
-    ciphertext = encryptor.update(signed_data) + encryptor.finalize()
+    ciphertext = nonce + encryptor.update(signed_data) + encryptor.finalize()
 
     # key encryption
     sender_encrypted_aes_key = private_key.public_key().encrypt(
@@ -179,17 +200,16 @@ def send_message(private_key: RSAPrivateKey, public_key: RSAPublicKey, timestamp
             label=None
         )
     )
-
+    recipient_id = ""
+    sender_id = ""
     # data to send
     package = {
-        "encrypted_keys": {
-            f"{recipient}": bytes_to_base64(recipient_encrypted_aes_key),
-            f"{sender}": bytes_to_base64(sender_encrypted_aes_key)
+        "keys": {
+            f"{recipient_id}": bytes_to_base64(recipient_encrypted_aes_key),
+            f"{sender_id}": bytes_to_base64(sender_encrypted_aes_key)
         },
-        "nonce": bytes_to_base64(nonce),
-        "context": bytes_to_base64(ciphertext),
-        "sender": sender,
-        "recipient": recipient,
+        "ciphertext": bytes_to_base64(ciphertext),
+        "recipient_id": recipient_id,
         "timestamp": timestamp.isoformat(),
     }
     return package
@@ -204,8 +224,8 @@ def receive_message(
 ) -> bytes:
     # get data from package
     encrypted_aes_key = base64_to_bytes(package["encrypted_keys"][recipient])
-    nonce = base64_to_bytes(package["nonce"])
-    ciphertext = base64_to_bytes(package["context"])
+    nonce = base64_to_bytes(package["context"])[:16]
+    ciphertext = base64_to_bytes(package["context"])[16:]
 
     # decrypt aes key
     aes_key = private_key.decrypt(
@@ -249,8 +269,8 @@ def receive_message(
     return message
 
 if __name__ == "__main__":
-    generate_keypair("admin")
-    priv, pub, api_key = login("admin")
+    #generate_keypair("test")
+    priv, pub, api_key = login("test")
     #ap = "fi8U5UqgAh7FAClapWUuDvgjNkRcddA_Mtg22RZ1Nbs="
     #print(api_key)
     logout(api_key)
