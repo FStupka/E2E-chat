@@ -116,8 +116,8 @@ def login(username: str):
             print(response.text, response.status_code)
             return
         data = response.json()
-        public_key = serialization.load_pem_public_key(data.get("public_key", "").encode())
-        return (private_key, public_key, api_key)
+
+        return (private_key, private_key.public_key(), api_key)
 
 def logout(api_key):
     headers = {
@@ -238,8 +238,8 @@ def receive_message(
     return message
 
 if __name__ == "__main__":
-    generate_keypair("admin")
-    priv, pub, api_key = login("test")
+    #generate_keypair("admin")
+    priv, pub, api_key = login("admin")
     #ap = "fi8U5UqgAh7FAClapWUuDvgjNkRcddA_Mtg22RZ1Nbs="
     #print(api_key)
     logout(api_key)
