@@ -3,6 +3,7 @@ import ssl
 from datetime import datetime, timedelta, timezone
 
 import uvicorn
+from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from fastapi import FastAPI, Depends, HTTPException, Header
 from pydantic import BaseModel
@@ -27,11 +28,19 @@ db_user = os.getenv("POSTGRES_USER")
 db_pass = os.getenv("POSTGRES_PASSWORD")
 db_dat = os.getenv("POSTGRES_DB")
 server_port = int(os.getenv("SERVER_PORT"))
-server_privatekey_path = os.getenv("SERVER_PRIVATEKEY_PATH")
-server_certificate_path = os.getenv("SERVER_CERTIFICATE_PATH")
+server_transport_privatekey_path = os.getenv("SERVER_TRANSPORT_PRIVATEKEY_PATH")
+server_transport_certificate_path = os.getenv("SERVER_TRANSPORT_CERTIFICATE_PATH")
+server_storage_privatekey_path = os.getenv("SERVER_STORAGE_PRIVATEKEY_PATH")
+server_storage_certificate_path = os.getenv("SERVER_STORAGE_CERTIFICATE_PATH")
 DATABASE_URL = f"postgresql+asyncpg://{db_user}:{db_pass}@localhost:5432/{db_dat}"
 
 SERVER_SECRET = b"super-secret-server-key"
+with open(server_storage_privatekey_path, "rb") as key_file:
+    data = key_file.read()
+storage_private_key = serialization.load_pem_private_key(data, password=None)
+with open(server_storage_certificate_path, "rb") as cert_file:
+    data = cert_file.read()
+storage_cert = x509.load_pem_x509_certificate(data)
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 
@@ -58,15 +67,15 @@ def hash_api_key(api_key: bytes) -> str:
 # registration
 class RegisterData(BaseModel):
     username: str
-    public_key: str
+    csr: str
 
 @app.post("/register")
 async def register(data: RegisterData, db: AsyncSession = Depends(get_db)):
     try:
-        public = serialization.load_pem_public_key(data.public_key.encode())
+        csr = x509.load_pem_x509_csr(data.csr.encode())
     except:
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Invalid public key format")
-    if not isinstance(public, rsa.RSAPublicKey) or public.key_size <= 1024:
+    if not isinstance(csr.public_key(), rsa.RSAPublicKey) or csr.public_key().key_size != 4096:
         raise HTTPException(status.HTTP_417_EXPECTATION_FAILED, "Public key if incorrect type")
 
     result = await db.execute(
@@ -76,9 +85,26 @@ async def register(data: RegisterData, db: AsyncSession = Depends(get_db)):
     if user:
         raise HTTPException(status.HTTP_409_CONFLICT, "A user with this email is already registered.")
 
+    if csr.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value != data.username:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Not same username in CSR")
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(csr.subject)
+        .issuer_name(storage_cert.subject)
+        .public_key(csr.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(timezone.utc))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
+        .add_extension(
+            x509.BasicConstraints(ca=False, path_length=None), critical=True
+        )
+        .sign(private_key=storage_private_key, algorithm=hashes.SHA256())
+    )
+
+    certificate_str = certificate.public_bytes(encoding=serialization.Encoding.PEM).decode()
 
     try:
-        user = User(username=data.username, public_key=data.public_key,
+        user = User(username=data.username, public_key_cert=certificate_str,
                     api_key_hash="!")
         db.add(user)
         await db.commit()
@@ -114,9 +140,18 @@ async def get_api(data: GetApiData, db: AsyncSession = Depends(get_db)):
     except:
         await db.rollback()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Database error")
-    pub = serialization.load_pem_public_key(user.public_key.encode())
-
-    encrypted_api = base64.urlsafe_b64encode(pub.encrypt(api_key,
+    cert = x509.load_pem_x509_certificate(user.public_key_cert.encode())
+    public_key: RSAPublicKey= storage_cert.public_key()
+    try:
+        public_key.verify(cert.signature,
+                      cert.tbs_certificate_bytes,
+                      padding.PKCS1v15(),
+                      hashes.SHA256())
+    except InvalidSignature:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Public key is corrupted")
+    if cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value != user.username:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Public key is corrupted")
+    encrypted_api = base64.urlsafe_b64encode(cert.public_key().encrypt(api_key,
                 padding.OAEP(
                     mgf=padding.MGF1(algorithm=hashes.SHA256()),
                     algorithm=hashes.SHA256(),
@@ -151,17 +186,26 @@ async def authenticate(data: AuthenticateData, db: AsyncSession = Depends(get_db
 
     time_now = datetime.now(timezone.utc)
     timestamp = datetime.fromisoformat(data.timestamp)
-    print(timestamp)
-    print(time_now)
     if time_now < timestamp or timestamp + timedelta(minutes=1) < time_now:
         raise HTTPException(status.HTTP_417_EXPECTATION_FAILED, "Timestamp is older then 1 minute")
-    if timestamp < user.api_key_created or user.api_key_created + timedelta(minutes=5) < timestamp:
+    if user.api_key_created is None or timestamp < user.api_key_created or user.api_key_created + timedelta(minutes=5) < timestamp:
         raise HTTPException(status.HTTP_417_EXPECTATION_FAILED, "Timestamp not enough fresh for API key")
 
     if hash_api_key(data.api_key.encode()) != user.api_key_hash:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid API key")
     # Verify signature(api_key)
-    pub : RSAPublicKey = serialization.load_pem_public_key(user.public_key.encode())
+    cert = x509.load_pem_x509_certificate(user.public_key_cert.encode())
+    public_key: RSAPublicKey = storage_cert.public_key()
+    try:
+        public_key.verify(cert.signature,
+                          cert.tbs_certificate_bytes,
+                          padding.PKCS1v15(),
+                          hashes.SHA256())
+    except InvalidSignature:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Public key is corrupted")
+    if cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value != user.username:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Public key is corrupted")
+    pub : RSAPublicKey = cert.public_key()
 
     signed_data = f"{data.timestamp} - {data.api_key}".encode()
 
@@ -186,6 +230,7 @@ async def authenticate(data: AuthenticateData, db: AsyncSession = Depends(get_db
     # here get user data I need
     return {
         "status": "authenticated",
+        "user_id": user.id
     }
 
 
@@ -370,7 +415,7 @@ async def user_by_username(target_user: User = Depends(get_target_user), current
     user = result.scalar_one_or_none()
     return {
         "username": user.username,
-        "public_key": user.public_key,
+        "public_key_cert": user.public_key_cert,
     }
 
 @app.get("/")
@@ -385,7 +430,7 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=server_port,
-        ssl_certfile=server_certificate_path,
-        ssl_keyfile=server_privatekey_path,
+        ssl_certfile=server_transport_certificate_path,
+        ssl_keyfile=server_transport_privatekey_path,
         ssl_version=ssl.PROTOCOL_TLS_SERVER,
     )
