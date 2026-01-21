@@ -976,11 +976,18 @@ class ChatScreen(QWidget):
                 empty_label.setStyleSheet("padding: 20px;")
                 self.user_list_layout.insertWidget(0, empty_label)
             else:
-                for u in users:
+                for idx, u in enumerate(users):
                     item = UserListItem(u["user_id"], u["username"], self.dark_mode)
                     item.clicked.connect(self._select_user)
                     self.user_list_layout.insertWidget(self.user_list_layout.count() - 1, item)
                     self.user_items.append(item)
+
+                    # ✅ auto-select first user
+                    if idx == 0 and self.target_id is None:
+                        QTimer.singleShot(
+                            0,
+                            lambda uid=u["user_id"], uname=u["username"]: self._select_user(uid, uname)
+                        )
         except Exception as e:
             if self._handle_unauthorized_if_needed(e):
                 return
