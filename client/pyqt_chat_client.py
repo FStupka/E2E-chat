@@ -10,6 +10,7 @@ Server changes handled here:
 - /messages/{user_id} fetches messages in the conversation with that target user.
 - Certificates are used as "public key container" (public_key_cert).
 
+not really, one keystorage is enough
 Local demo: run TWO instances with different key storage folders:
   set PRIVATEKEY_STORAGE=key_storage_alice
   python pyqt_chat_client.py
@@ -267,14 +268,14 @@ def private_key_path(username: str) -> Path:
     return PRIVATEKEY_STORAGE_PATH / f"{username}_private.pem"
 
 
-def ensure_rsa_keypair(username: str, password: str) -> RSAPrivateKey:
+def ensure_rsa_keypair(username: str, password: str) -> tuple[RSAPrivateKey, bool]:
     """
     Generates (or loads) local RSA private key.
     Key is encrypted locally with `password`.
     """
     p = private_key_path(username)
     if p.exists():
-        return load_private_key(username, password)
+        return load_private_key(username, password), False
 
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
     p.write_bytes(
@@ -284,7 +285,7 @@ def ensure_rsa_keypair(username: str, password: str) -> RSAPrivateKey:
             encryption_algorithm=serialization.BestAvailableEncryption(password.encode("utf-8")),
         )
     )
-    return private_key
+    return private_key, True
 
 
 def load_private_key(username: str, password: str) -> RSAPrivateKey:
@@ -307,7 +308,7 @@ def build_csr(username: str, private_key: RSAPrivateKey) -> str:
 
 
 def decrypt_api_key(private_key: RSAPrivateKey, encrypted_api_key_b64_urlsafe: str) -> str:
-    encrypted = base64.urlsafe_b64decode(encrypted_api_key_b64_urlsafe.encode("utf-8"))
+    encrypted = b64d_url(encrypted_api_key_b64_urlsafe)
     api_key_bytes = private_key.decrypt(
         encrypted,
         padding.OAEP(
@@ -332,10 +333,10 @@ def sign_api_key(private_key: RSAPrivateKey, timestamp_iso: str, api_key: str) -
         ),
         hashes.SHA256(),
     )
-    return base64.urlsafe_b64encode(signature).decode("utf-8")
+    return b64e_url(signature)
 
 
-def encrypt_chat_payload(sender: str, recipient_id: str, text: str) -> tuple[bytes, bytes]:
+def encrypt_chat_payload(sender: str, recipient: str, text: str) -> tuple[bytes, bytes]:
     """
     Encrypt message payload using AES-CTR with random 256-bit key.
 
@@ -343,7 +344,7 @@ def encrypt_chat_payload(sender: str, recipient_id: str, text: str) -> tuple[byt
     """
     payload = {
         "sender": sender,
-        "recipient_id": recipient_id,
+        "recipient": recipient,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "text": text,
     }
@@ -434,7 +435,7 @@ class LoginScreen(QWidget):
         self.status.setWordWrap(True)
         self.layout().addWidget(self.status)
 
-        self.login_btn = QPushButton("Register & Login")
+        self.login_btn = QPushButton("Register / Login")
         self.login_btn.clicked.connect(self._login_clicked)
         self.layout().addWidget(self.login_btn)
 
@@ -474,11 +475,12 @@ class LoginScreen(QWidget):
 
         try:
             self._set_busy(True, "Generating/loading local keypair...")
-            priv = ensure_rsa_keypair(username, password)
+            priv, is_new = ensure_rsa_keypair(username, password)
 
-            self._set_busy(True, "Building CSR and registering...")
-            csr_pem = build_csr(username, priv)
-            self.api.register_user(username, csr_pem)
+            if is_new:
+                self._set_busy(True, "Building CSR and registering...")
+                csr_pem = build_csr(username, priv)
+                self.api.register_user(username, csr_pem)
 
             self._set_busy(True, "Requesting API key...")
             encrypted_api = self.api.get_api_key_encrypted(username)
@@ -585,7 +587,7 @@ class ChatScreen(QWidget):
 
     def start(self, auth: AuthContext) -> None:
         self.auth = auth
-        self.me_label.setText(f"Logged in as: {auth.username}  (id: {auth.user_id})")
+        self.me_label.setText(f"Logged in as: {auth.username}")
         self.chat_view.clear()
         self.seen_message_ids.clear()
 
@@ -683,12 +685,13 @@ class ChatScreen(QWidget):
             # Reset UI for this chat view
             self.chat_view.clear()
             self.seen_message_ids.clear()
-            self._append_system(f"Selected chat target: {target_name} (id: {target_id})")
+            self._append_system(f"Selected chat target: {target_name}")
     
             # Immediately load & render history ONCE (so poll won't re-print it)
             msgs = self.api.receive_messages(self.auth.api_key, self.target_user_id)
             for m in msgs:
                 mid = str(m.get("message_id", "")).strip()
+                # idk if this happens
                 if not mid:
                     continue
                 self.seen_message_ids.add(mid)
@@ -728,7 +731,7 @@ class ChatScreen(QWidget):
             # 1) Encrypt payload with random AES key
             ciphertext_blob, aes_key = encrypt_chat_payload(
                 sender=self.auth.username,
-                recipient_id=self.target_user_id,
+                recipient=self.target_username,
                 text=text,
             )
 

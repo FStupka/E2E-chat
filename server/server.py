@@ -1,10 +1,12 @@
 import os, hmac, hashlib, base64
 import ssl
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import uvicorn
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from fastapi import FastAPI, Depends, HTTPException, Header
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -20,25 +22,25 @@ from cryptography.exceptions import InvalidSignature
 
 from dotenv import load_dotenv
 
-# Load .env file
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
 # Access environment variables
-db_user = os.getenv("POSTGRES_USER")
-db_pass = os.getenv("POSTGRES_PASSWORD")
-db_dat = os.getenv("POSTGRES_DB")
-server_port = int(os.getenv("SERVER_PORT"))
-server_transport_privatekey_path = os.getenv("SERVER_TRANSPORT_PRIVATEKEY_PATH")
-server_transport_certificate_path = os.getenv("SERVER_TRANSPORT_CERTIFICATE_PATH")
-server_storage_privatekey_path = os.getenv("SERVER_STORAGE_PRIVATEKEY_PATH")
-server_storage_certificate_path = os.getenv("SERVER_STORAGE_CERTIFICATE_PATH")
-DATABASE_URL = f"postgresql+asyncpg://{db_user}:{db_pass}@localhost:5432/{db_dat}"
+DB_USER = os.getenv("POSTGRES_USER", "admin")
+DB_PASS = os.getenv("POSTGRES_PASSWORD")
+DB_DAT = os.getenv("POSTGRES_DB", "E2E-chat")
+SERVER_PORT = int(os.getenv("SERVER_PORT", "8088"))
+SERVER_TRANSPORT_PRIVATEKEY_PATH = os.getenv("SERVER_TRANSPORT_PRIVATEKEY_PATH")
+SERVER_TRANSPORT_CERTIFICATE_PATH = os.getenv("SERVER_TRANSPORT_CERTIFICATE_PATH")
+SERVER_STORAGE_PRIVATEKEY_PATH = os.getenv("SERVER_STORAGE_PRIVATEKEY_PATH")
+SERVER_STORAGE_CERTIFICATE_PATH = os.getenv("SERVER_STORAGE_CERTIFICATE_PATH")
+DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{DB_PASS}@localhost:5432/{DB_DAT}"
 
 SERVER_SECRET = b"super-secret-server-key"
-with open(server_storage_privatekey_path, "rb") as key_file:
+with open(SERVER_STORAGE_PRIVATEKEY_PATH, "rb") as key_file:
     data = key_file.read()
 storage_private_key = serialization.load_pem_private_key(data, password=None)
-with open(server_storage_certificate_path, "rb") as cert_file:
+with open(SERVER_STORAGE_CERTIFICATE_PATH, "rb") as cert_file:
     data = cert_file.read()
 storage_cert = x509.load_pem_x509_certificate(data)
 
@@ -59,9 +61,44 @@ async def get_db():
     async with AsyncSessionLocal() as db:
         yield db
 
-# Todo: think about diferent algorithm
-def hash_api_key(api_key: bytes) -> str:
-    return hmac.new(SERVER_SECRET, api_key, hashlib.sha256).hexdigest()
+def b64e_url(data: bytes) -> str:
+    """urlsafe base64 (matches your server usage for ciphertext + keys)."""
+    return base64.urlsafe_b64encode(data).decode("utf-8")
+
+
+def b64d_url(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s.encode("utf-8"))
+
+
+def digest_api_key(api_key: str) -> str:
+
+    salt = os.urandom(16)
+
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,  # 256-bit derived key
+        salt=salt,
+        iterations=200000
+    )
+
+    derived_key = kdf.derive(b64d_url(api_key))
+    return b64e_url(salt+derived_key)
+
+
+
+def api_key_checker(api_key: str, api_key_dk: str) -> bool:
+    salt = b64d_url(api_key_dk)[:16]
+    stored_dk = b64d_url(api_key_dk)[16:]
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,  # 256-bit derived key
+        salt=salt,
+        iterations=200000
+    )
+
+    derived_key = kdf.derive(b64d_url(api_key))
+
+    return derived_key == stored_dk
 
 def certificate_validator(cert: x509.Certificate, username: str) -> bool:
     storage_public_key = storage_cert.public_key()
@@ -144,7 +181,7 @@ async def register(data: RegisterData, db: AsyncSession = Depends(get_db)):
 
     try:
         user = User(username=data.username, public_key_cert=certificate_str,
-                    api_key_hash="!")
+                    api_key_dk="!")
         db.add(user)
         await db.commit()
     except:
@@ -168,10 +205,10 @@ async def get_api(data: GetApiData, db: AsyncSession = Depends(get_db)):
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
 
-    api_key = base64.urlsafe_b64encode(os.urandom(32))
+    api_key = b64e_url(os.urandom(32))
 
     try:
-        user.api_key_hash = hash_api_key(api_key)
+        user.api_key_dk = digest_api_key(api_key)
         user.api_key_created = datetime.now(timezone.utc)
         user.api_key_expires = None
         await db.commit()
@@ -184,7 +221,7 @@ async def get_api(data: GetApiData, db: AsyncSession = Depends(get_db)):
     if not certificate_validator(cert, user.username):
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Public key is corrupted")
 
-    encrypted_api = base64.urlsafe_b64encode(cert.public_key().encrypt(api_key,
+    encrypted_api = base64.urlsafe_b64encode(cert.public_key().encrypt(api_key.encode(),
                 padding.OAEP(
                     mgf=padding.MGF1(algorithm=hashes.SHA256()),
                     algorithm=hashes.SHA256(),
@@ -224,7 +261,7 @@ async def authenticate(data: AuthenticateData, db: AsyncSession = Depends(get_db
     if user.api_key_created is None or timestamp < user.api_key_created or user.api_key_created + timedelta(minutes=5) < timestamp:
         raise HTTPException(status.HTTP_417_EXPECTATION_FAILED, "Timestamp not enough fresh for API key")
 
-    if hash_api_key(data.api_key.encode()) != user.api_key_hash:
+    if not api_key_checker(data.api_key, user.api_key_dk):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid API key")
     # Verify signature(api_key)
 
@@ -269,11 +306,13 @@ async def authenticate(data: AuthenticateData, db: AsyncSession = Depends(get_db
 # Auth Dependency
 # =========================
 async def get_current_user(x_api_key: str = Header(...), db: AsyncSession = Depends(get_db)):
-    h = hash_api_key(x_api_key.encode())
-    result = await db.execute(
-        select(User).where(User.api_key_hash == h)
-    )
-    user = result.scalar_one_or_none()
+    result = await db.execute(select(User))
+    users = result.scalars().all()
+    user = None
+    for u in users:
+        if api_key_checker(x_api_key, u.api_key_dk):
+            user = u
+            break
     if not user or user.api_key_expires < datetime.now(timezone.utc):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized")
     try:
@@ -465,8 +504,8 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=server_port,
-        ssl_certfile=server_transport_certificate_path,
-        ssl_keyfile=server_transport_privatekey_path,
+        port=SERVER_PORT,
+        ssl_certfile=SERVER_TRANSPORT_CERTIFICATE_PATH,
+        ssl_keyfile=SERVER_TRANSPORT_PRIVATEKEY_PATH,
         ssl_version=ssl.PROTOCOL_TLS_SERVER,
     )
