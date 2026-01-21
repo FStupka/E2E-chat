@@ -496,7 +496,7 @@ class ThemeToggle(QPushButton):
     def __init__(self, dark_mode: bool):
         super().__init__()
         self.dark_mode = dark_mode
-        self.setFixedSize(60, 32)
+        self.setFixedSize(60, 40)
         self.setCheckable(True)
         self.setChecked(dark_mode)
         self.clicked.connect(lambda: self.toggled.emit(self.isChecked()))
@@ -513,6 +513,24 @@ class ThemeToggle(QPushButton):
     def set_dark_mode(self, dark: bool):
         self.dark_mode = dark
         self.update_style()
+
+class ExitButton(QPushButton):
+    def __init__(self):
+        super().__init__("⏻")
+        self.setFixedSize(60, 40)
+        self.setToolTip("Exit")
+        self.setStyleSheet("""
+            QPushButton {
+                background: #DC3545;
+                color: white;
+                border-radius: 16px;
+                font-size: 16px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #B02A37;
+            }
+        """)
 
 class LoginScreen(QWidget):
     def __init__(self, api: ApiClient, on_logged_in, dark_mode: bool):
@@ -1113,19 +1131,25 @@ class MainWindow(QMainWindow):
         self.api = ApiClient(SERVER_URL, SERVER_CERTIFICATE_PATH)
 
         # Menu bar
-        menubar = self.menuBar()
+        toolbar = QToolBar()
+        toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(16, 16))
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
 
-        # Theme toggle in menu
+        # Left: theme toggle
         self.theme_toggle = ThemeToggle(self.dark_mode)
         self.theme_toggle.toggled.connect(self._toggle_theme)
+        toolbar.addWidget(self.theme_toggle)
 
-        theme_action = QWidgetAction(self)
-        theme_action.setDefaultWidget(self.theme_toggle)
-        menubar.addAction(theme_action)
+        # Spacer to push Exit to the right
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        toolbar.addWidget(spacer)
 
-        exit_action = QAction("Exit", self)
-        exit_action.triggered.connect(self.close)
-        menubar.addAction(exit_action)
+        # Right: exit button
+        exit_btn = ExitButton()
+        exit_btn.clicked.connect(self.close)
+        toolbar.addWidget(exit_btn)
 
         # Stack
         self.stack = QStackedWidget()
