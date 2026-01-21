@@ -20,48 +20,27 @@ Local demo: run TWO instances with different key storage folders:
 """
 
 from __future__ import annotations
-
-import base64
-import json
-import os
+import base64, json, os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-
 import requests
 from dotenv import load_dotenv
-
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
+from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QSize, pyqtSignal, QPoint
+from PyQt6.QtGui import QFont, QIcon, QPalette, QColor, QPainter, QLinearGradient, QAction
+from PyQt6.QtWidgets import *
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import (
-    QApplication,
-    QComboBox,
-    QFormLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QStackedWidget,
-    QTextBrowser,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
-)
-
-
-# ---------------------------------------------------------------------------
-# Environment / paths
-# ---------------------------------------------------------------------------
+#
+# ==# ---------------------------------------------------------------------------
+# # Environment / paths
+# # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -78,15 +57,64 @@ PRIVATEKEY_STORAGE_PATH = (BASE_DIR / PRIVATEKEY_STORAGE).resolve()
 PRIVATEKEY_STORAGE_PATH.mkdir(parents=True, exist_ok=True)
 
 SERVER_URL = f"https://{SERVER_ADDRESS}:{SERVER_PORT}"
-
-SERVER_STORAGE_CERTIFICATE_PATH = os.getenv("SERVER_STORAGE_CERTIFICATE_PATH", "../server/certs/storage_cert.pem")
-
-SERVER_STORAGE_CERTIFICATE_PATH = str((BASE_DIR / SERVER_STORAGE_CERTIFICATE_PATH).resolve())
+SERVER_STORAGE_CERTIFICATE_PATH = str((BASE_DIR / os.getenv("SERVER_STORAGE_CERTIFICATE_PATH", "../server/certs/storage_cert.pem")).resolve())
 
 def load_storage_ca_cert() -> x509.Certificate:
     return x509.load_pem_x509_certificate(Path(SERVER_STORAGE_CERTIFICATE_PATH).read_bytes())
-
 STORAGE_CA_CERT = load_storage_ca_cert()
+
+# === THEME SYSTEM ===
+class AppTheme:
+    LIGHT = {
+        'bg': '#F5F7FA', 'card': '#FFFFFF', 'input': '#FFFFFF', 'bubble_me': '#007AFF', 'bubble_them': '#E9ECEF',
+        'text': '#1A1A1A', 'text_secondary': '#6B7280', 'text_on_primary': '#FFFFFF', 'border': '#E5E7EB',
+        'accent': '#007AFF', 'accent_hover': '#0051D5', 'danger': '#DC3545', 'success': '#28A745', 'bg_chosen': '#BEBEBE'
+    }
+    DARK = {
+        'bg': '#1A1D21', 'card': '#242832', 'input': '#2D323E', 'bubble_me': '#0A84FF', 'bubble_them': '#2D323E',
+        'text': '#E8EAED', 'text_secondary': '#9BA1A6', 'text_on_primary': '#FFFFFF', 'border': '#3E4451',
+        'accent': '#0A84FF', 'accent_hover': '#409CFF', 'danger': '#FF453A', 'success': '#30D158', 'bg_chosen': '#545454'
+    }
+
+def get_stylesheet(dark_mode: bool) -> str:
+    t = AppTheme.DARK if dark_mode else AppTheme.LIGHT
+    return f"""
+QWidget {{ background: {t['bg']}; color: {t['text']}; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; }}
+QPushButton {{ 
+    background: {t['accent']}; 
+    color: {t['text_on_primary']}; 
+    border: none; 
+    border-radius: 8px; 
+    padding: 10px 20px; 
+    font-weight: 600;
+    font-size: 14px;
+}}
+QPushButton:hover {{ background: {t['accent_hover']}; }}
+QPushButton:disabled {{ background: {t['border']}; color: {t['text_secondary']}; }}
+QPushButton#secondary {{ 
+    background: {t['card']}; 
+    color: {t['text']}; 
+    border: 2px solid {t['border']};
+    font-size: 14px;
+}}
+QPushButton#secondary:hover {{ background: {t['border']}; }}
+QPushButton#danger {{ 
+    background: {t['danger']};
+    color: {t['text_on_primary']};
+    font-size: 14px;
+}}
+QLineEdit, QTextEdit, QComboBox {{ background: {t['input']}; color: {t['text']}; border: 2px solid {t['border']}; border-radius: 8px; padding: 12px; }}
+QLineEdit:focus, QTextEdit:focus, QComboBox:focus {{ border-color: {t['accent']}; }}
+QLabel#title {{ font-size: 28px; font-weight: 700; }}
+QLabel#subtitle {{ color: {t['text_secondary']}; font-size: 13px; }}
+QFrame#card {{ background: {t['card']}; border-radius: 0px; }}
+QFrame#separator {{ background: {t['border']}; }}
+QFrame#userItem:hover {{ background: {t['border']}; }}
+QScrollBar:vertical {{ background: {t['bg']}; width: 10px; border-radius: 5px; }}
+QScrollBar::handle:vertical {{ background: {t['border']}; border-radius: 5px; }}
+QScrollBar::handle:vertical:hover {{ background: {t['text_secondary']}; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+"""
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -197,18 +225,20 @@ class ApiClient:
 
     def get_user_cert(self, api_key: str, user_id: str) -> x509.Certificate:
         """
-        Your server has a bug: route is missing leading slash:
-            @app.get("users/{user_id}")
-
-        It SHOULD be: /users/{user_id}
-        We'll try both paths to be robust.
+        Server route should be: /users/{user_id}
         """
-        for path in (f"/users/{user_id}", f"users/{user_id}"):
-            r = requests.get(f"{self.server_url}{path}", headers={"x-api-key": api_key}, verify=self.verify_path)
-            if r.status_code == 200:
-                pem = r.json()["public_key_cert"].encode("utf-8")
-                return x509.load_pem_x509_certificate(pem)
-        raise RuntimeError(f"Cannot fetch user cert for {user_id}. (Route might be broken in server)")
+        path = f"/users/{user_id}"
+        r = requests.get(
+            f"{self.server_url}{path}",
+            headers={"x-api-key": api_key},
+            verify=self.verify_path,
+        )
+
+        if r.status_code == 200:
+            pem = r.json()["public_key_cert"].encode("utf-8")
+            return x509.load_pem_x509_certificate(pem)
+
+        raise RuntimeError(f"Cannot fetch user cert for {user_id}.")
 
     # --------------------
     # MESSAGES
@@ -374,7 +404,7 @@ def validate_user_cert(cert: x509.Certificate, expected_username: str, ca_cert: 
         return False
 
 
-# encrypt helper methods
+
 def canonical_payload_bytes(payload: dict) -> bytes:
     # stable bytes so signature verifies across machines
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -459,158 +489,126 @@ def rsa_decrypt_key(priv: RSAPrivateKey, enc_key: bytes) -> bytes:
         ),
     )
 
+# === UI COMPONENTS ===
+class ThemeToggle(QPushButton):
+    toggled = pyqtSignal(bool)
 
-# ---------------------------------------------------------------------------
-# GUI Widgets
-# ---------------------------------------------------------------------------
+    def __init__(self, dark_mode: bool):
+        super().__init__()
+        self.dark_mode = dark_mode
+        self.setFixedSize(60, 32)
+        self.setCheckable(True)
+        self.setChecked(dark_mode)
+        self.clicked.connect(lambda: self.toggled.emit(self.isChecked()))
+        self.update_style()
+
+    def update_style(self):
+        self.setText("🌙" if self.dark_mode else "☀️")
+        self.setStyleSheet(f"""
+            QPushButton {{ background: {'#2D323E' if self.dark_mode else '#E5E7EB'}; border-radius: 16px; 
+                          font-size: 16px; padding: 0; }}
+            QPushButton:hover {{ background: {'#3E4451' if self.dark_mode else '#D1D5DB'}; }}
+        """)
+
+    def set_dark_mode(self, dark: bool):
+        self.dark_mode = dark
+        self.update_style()
 
 class LoginScreen(QWidget):
-    """
-    Login / register screen.
-
-    Flow:
-    1) Ensure local RSA keypair exists
-    2) Build CSR and register (idempotent for demo)
-    3) Request API key (encrypted) and decrypt using private key
-    4) Sign and authenticate
-    """
-
-    def __init__(self, api: ApiClient, on_logged_in):
+    def __init__(self, api: ApiClient, on_logged_in, dark_mode: bool):
         super().__init__()
         self.api = api
         self.on_logged_in = on_logged_in
 
-        self.setLayout(QVBoxLayout())
+        layout = QVBoxLayout()
+        layout.setContentsMargins(80, 60, 80, 60)
+        layout.setSpacing(24)
+        self.setLayout(layout)
 
-        title = QLabel("E2E Chat Client")
+        # Title
+        title = QLabel("🔐 E2E Chat")
+        title.setObjectName("title")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size: 20px; font-weight: 700; padding: 10px;")
-        self.layout().addWidget(title)
+        layout.addWidget(title)
 
-        form = QFormLayout()
-        self.username_edit = QLineEdit()
-        self.username_edit.setPlaceholderText("e.g. alice")
-        self.username_edit.setMaxLength(32)
+        subtitle = QLabel("End-to-end encrypted messaging")
+        subtitle.setObjectName("subtitle")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(subtitle)
+        layout.addSpacing(20)
 
-        self.password_edit = QLineEdit()
-        self.password_edit.setPlaceholderText("local key password")
-        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password_edit.setText("password123")  # project default
+        # Form
+        self.username = QLineEdit()
+        self.username.setPlaceholderText("Username")
+        self.username.setMaxLength(32)
+        self.password = QLineEdit()
+        self.password.setPlaceholderText("Password (min 10 chars)")
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
 
-        form.addRow("Username:", self.username_edit)
-        form.addRow("Key password:", self.password_edit)
-        self.layout().addLayout(form)
+        layout.addWidget(self.username)
+        layout.addWidget(self.password)
 
         self.status = QLabel("")
+        self.status.setObjectName("subtitle")
+        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setWordWrap(True)
-        self.layout().addWidget(self.status)
+        layout.addWidget(self.status)
 
-        self.register_btn = QPushButton("Register")
-        self.register_btn.clicked.connect(self._register_clicked)
-        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        self.reg_btn = QPushButton("Register")
+        self.reg_btn.setObjectName("secondary")
+        self.reg_btn.clicked.connect(self._register)
         self.login_btn = QPushButton("Login")
-        self.login_btn.clicked.connect(self._login_clicked)
-        
-        row = QHBoxLayout()
-        row.addWidget(self.register_btn)
-        row.addWidget(self.login_btn)
-        self.layout().addLayout(row)
+        self.login_btn.clicked.connect(self._login)
+        btn_layout.addWidget(self.reg_btn)
+        btn_layout.addWidget(self.login_btn)
+        layout.addLayout(btn_layout)
 
-        foot = QLabel(f"Server: {SERVER_URL} | Key storage: {PRIVATEKEY_STORAGE_PATH}")
-        foot.setStyleSheet("color: #666; font-size: 11px;")
-        self.layout().addWidget(foot)
+        footer = QLabel(f"🌐 {SERVER_URL}\n")
+        footer.setObjectName("subtitle")
+        footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(footer)
+        layout.addStretch()
 
-        self.layout().addStretch(1)
-
-    def _set_busy(self, busy: bool, msg: str = "") -> None:
+    def _set_busy(self, busy: bool, msg: str = ""):
+        self.username.setEnabled(not busy)
+        self.password.setEnabled(not busy)
+        self.reg_btn.setEnabled(not busy)
         self.login_btn.setEnabled(not busy)
-        self.register_btn.setEnabled(not busy)
-        self.username_edit.setEnabled(not busy)
-        self.password_edit.setEnabled(not busy)
         self.status.setText(msg)
 
-    def _register_clicked(self) -> None:
-        username = self.username_edit.text().strip()
-        password = self.password_edit.text()
-    
-        # --- username validation ---
-        if not username:
-            warn(self, "Missing username", "Please enter a username.")
-            return
-    
-        if len(username) > 32:
-            warn(self, "Invalid username", "Username must be at most 32 characters.")
-            return
-    
-        # alphanumeric only (letters+digits), no spaces, no underscores
-        if not username.isalnum():
-            warn(self, "Invalid username", "Username must be alphanumeric (letters and digits only).")
-            return
-    
-        # --- password validation ---
-        if not password:
-            warn(self, "Missing password", "Please enter a password for local private key encryption.")
-            return
-    
+    def _register(self):
+        username, password = self.username.text().strip(), self.password.text()
+        if not username or not username.isalnum() or len(username) > 32:
+            return warn(self, "Invalid", "Username must be alphanumeric, max 32 chars")
         if len(password) < 10:
-            warn(self, "Weak password", "Password must be at least 10 characters.")
-            return
-    
+            return warn(self, "Invalid", "Password must be at least 10 characters")
+
         try:
-            self._set_busy(True, "Generating/loading local keypair...")
-    
-            # Generate ONLY if missing; if exists, just load
+            self._set_busy(True, "Generating keypair...")
             priv, is_new = ensure_rsa_keypair(username, password)
-    
-            # Always build CSR and register (safe: server returns 200 or 409)
             self._set_busy(True, "Building CSR and registering...")
             csr_pem = build_csr(username, priv)
             self.api.register_user(username, csr_pem)
-    
             # Helpful UX messaging
             if is_new:
-                self._set_busy(False, "Registered. You can now click Login.")
-                info(self, "Registered", "Registration completed. Now click Login.")
+                self._set_busy(False, "✓ Registered. You can now click Login.")
+                info(self, "Registered", "✓ Registration completed. Now click Login.")
             else:
                 self._set_busy(False, "Registration checked. You can now click Login.")
                 info(self, "Register", "User already had a local key. Registration checked/updated. Now click Login.")
-    
+
         except Exception as e:
             self._set_busy(False, "")
             err(self, "Register failed", str(e))
 
-    def _login_clicked(self) -> None:
-        username = self.username_edit.text().strip()
-        password = self.password_edit.text()
-        
-        # Key validation
+    def _login(self):
+        username, password = self.username.text().strip(), self.password.text()
         if not private_key_path(username).exists():
-            warn(self, "Not registered locally", "No private key found. Click Register first.")
-            return
-        
-        # username validation
-        if len(username) > 32:
-            warn(self, "Invalid username", "Username must be at most 32 characters.")
-            return
-        
-        # alphanumeric only (letters+digits), no spaces, no underscores
-        if not username.isalnum():
-            warn(self, "Invalid username", "Username must be alphanumeric (letters and digits only).")
-            return
-
-        # empty fields
-        if not username:
-            warn(self, "Missing username", "Please enter a username.")
-            return
-        if not password:
-            warn(self, "Missing password", "Please enter a password for local private key encryption.")
-            return
-        
-        # password check
-        if len(password) < 10:
-            warn(self, "Weak password", "Password must be at least 10 characters.")
-            return
-
+            return warn(self, "Not Found", "No key found. Register first.")
+        if not username or not password or len(password) < 10:
+            return warn(self, "Invalid", "Check username and password")
 
         try:
             self._set_busy(True, "Generating/loading local keypair...")
@@ -638,463 +636,537 @@ class LoginScreen(QWidget):
             self._set_busy(False, "")
             err(self, "Login failed", str(e))
 
+class ChatBubble(QFrame):
+    def __init__(self, sender: str, ts: str, text: str, is_me: bool, dark: bool):
+        super().__init__()
+        self.setObjectName("card")
+        t = AppTheme.DARK if dark else AppTheme.LIGHT
+        bg = t['bubble_me'] if is_me else t['bubble_them']
+        tc = t['text_on_primary'] if is_me else t['text']
+
+        self.setStyleSheet(f"""
+            QFrame#card {{ background: {bg}; border-radius: 12px; padding: 10px 14px; }}
+            QLabel {{ color: {tc}; background: transparent; }}
+        """)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.setLayout(layout)
+
+        header = QHBoxLayout()
+        name = QLabel(f"<b>{sender}</b>")
+        time = QLabel(ts)
+        time.setStyleSheet("font-size: 11px; opacity: 0.7;")
+        header.addWidget(name)
+        header.addWidget(time)
+        header.addStretch()
+        layout.addLayout(header)
+
+        msg = QLabel(text)
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+
+        if is_me:
+            self.setMaximumWidth(400)
+            self.setContentsMargins(50, 4, 8, 4)
+        else:
+            self.setMaximumWidth(400)
+            self.setContentsMargins(8, 4, 50, 4)
+
+class UserListItem(QFrame):
+    clicked = pyqtSignal(str, str)  # user_id, username
+
+    def __init__(self, user_id: str, username: str, dark_mode: bool):
+        super().__init__()
+        self.user_id = user_id
+        self.username = username
+        self.dark_mode = dark_mode
+        self.selected = False
+
+        self.setObjectName("userItem")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(60)
+
+        layout = QHBoxLayout()
+        layout.setContentsMargins(16, 10, 16, 10)
+        self.setLayout(layout)
+
+        # Avatar circle
+        avatar = QLabel(username[0].upper())
+        avatar.setFixedSize(40, 40)
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setStyleSheet(f"""
+            background: {'#0A84FF' if dark_mode else '#007AFF'};
+            color: white;
+            border-radius: 20px;
+            font-weight: 700;
+            font-size: 16px;
+        """)
+        layout.addWidget(avatar)
+
+        # Username
+        name_label = QLabel(username)
+        name_label.setStyleSheet("font-weight: 600; font-size: 14px; background:transparent;")
+        layout.addWidget(name_label)
+        layout.addStretch()
+
+        # Online indicator
+        # indicator = QLabel("●")
+        # indicator.setStyleSheet("color: #30D158; font-size: 12px; background:transparent;")
+        # layout.addWidget(indicator)
+
+        self.update_style()
+
+    def update_style(self):
+        t = AppTheme.DARK if self.dark_mode else AppTheme.LIGHT
+        if self.selected:
+            self.setStyleSheet(f"QFrame#userItem {{ background: {t['bg_chosen']}; border-radius: 8px; }}")
+        else:
+            self.setStyleSheet(f"QFrame#userItem {{ background: transparent; border-radius: 8px; }}")
+
+    def set_selected(self, selected: bool):
+        self.selected = selected
+        self.update_style()
+
+    def mousePressEvent(self, event):
+        self.clicked.emit(self.user_id, self.username)
 
 class ChatScreen(QWidget):
-    """
-    Chat UI:
-    - Shows logged in user
-    - Dropdown lists all other users (/users)
-    - Select one to chat with
-    - Polls /messages/{user_id}
-    """
-
-    def __init__(self, api: ApiClient, on_logout):
+    def __init__(self, api: ApiClient, on_logout, dark_mode: bool):
         super().__init__()
         self.api = api
         self.on_logout = on_logout
+        self.dark_mode = dark_mode
+        self.auth = None
+        self.target_id = None
+        self.target_name = None
+        self.target_pub = None
+        self.seen = set()
+        self.user_items = []
 
-        self.auth: Optional[AuthContext] = None
+        # Main horizontal layout (sidebar + chat)
+        main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        self.setLayout(main_layout)
 
-        # currently selected chat target
-        self.target_user_id: Optional[str] = None
-        self.target_username: Optional[str] = None
-        self.target_pub: Optional[RSAPublicKey] = None
+        # === LEFT SIDEBAR ===
+        sidebar = QFrame()
+        sidebar.setObjectName("card")
+        sidebar.setFixedWidth(280)
+        sidebar_layout = QVBoxLayout()
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(0)
+        sidebar.setLayout(sidebar_layout)
 
-        # for not repeating messages
-        self.seen_message_ids: set[str] = set()
+        # Sidebar header
+        sidebar_header = QFrame()
+        sidebar_header.setFixedHeight(70)
+        header_layout = QVBoxLayout()
+        header_layout.setContentsMargins(16, 12, 16, 12)
+        sidebar_header.setLayout(header_layout)
 
-        self.setLayout(QVBoxLayout())
+        self.user_label = QLabel("Not logged in")
+        self.user_label.setStyleSheet("font-weight: 700; font-size: 16px;")
+        header_layout.addWidget(self.user_label)
 
-        # Top bar
-        top = QHBoxLayout()
-        self.me_label = QLabel("Logged in as: -")
-        self.me_label.setStyleSheet("font-weight: 700;")
-        top.addWidget(self.me_label)
-        top.addStretch(1)
+        messages_label = QLabel("Messages")
+        messages_label.setObjectName("subtitle")
+        header_layout.addWidget(messages_label)
 
-        self.refresh_users_btn = QPushButton("Refresh users")
-        self.refresh_users_btn.clicked.connect(self._refresh_users)
-        top.addWidget(self.refresh_users_btn)
+        sidebar_layout.addWidget(sidebar_header)
+
+        # Separator
+        sep1 = QFrame()
+        sep1.setObjectName("separator")
+        sep1.setFixedHeight(1)
+        sidebar_layout.addWidget(sep1)
+
+        # User list scroll area
+        self.user_scroll = QScrollArea()
+        self.user_scroll.setWidgetResizable(True)
+        self.user_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self.user_list_widget = QWidget()
+        self.user_list_layout = QVBoxLayout()
+        self.user_list_layout.setContentsMargins(8, 8, 8, 8)
+        self.user_list_layout.setSpacing(4)
+        self.user_list_layout.addStretch()
+        self.user_list_widget.setLayout(self.user_list_layout)
+        self.user_scroll.setWidget(self.user_list_widget)
+
+        sidebar_layout.addWidget(self.user_scroll, 1)
+
+        # Separator
+        sep2 = QFrame()
+        sep2.setObjectName("separator")
+        sep2.setFixedHeight(1)
+        sidebar_layout.addWidget(sep2)
+
+        # Sidebar footer buttons
+        sidebar_footer = QFrame()
+        sidebar_footer.setFixedHeight(100)
+        footer_layout = QVBoxLayout()
+        footer_layout.setContentsMargins(12, 10, 12, 10)
+        footer_layout.setSpacing(8)
+        sidebar_footer.setLayout(footer_layout)
+
+        self.refresh_btn = QPushButton("🔄 Refresh Users")
+        self.refresh_btn.setObjectName("secondary")
+        self.refresh_btn.setMinimumHeight(36)
+        self.refresh_btn.clicked.connect(self._refresh_users)
+        footer_layout.addWidget(self.refresh_btn)
 
         self.logout_btn = QPushButton("Logout")
-        self.logout_btn.clicked.connect(self._logout_clicked)
-        top.addWidget(self.logout_btn)
+        self.logout_btn.setObjectName("danger")
+        self.logout_btn.setMinimumHeight(36)
+        self.logout_btn.clicked.connect(self._logout)
+        footer_layout.addWidget(self.logout_btn)
 
-        self.layout().addLayout(top)
+        sidebar_layout.addWidget(sidebar_footer)
 
-        # User dropdown row
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Chat with:"))
+        main_layout.addWidget(sidebar)
 
-        self.user_combo = QComboBox()
-        self.user_combo.setMinimumWidth(250)
-        row.addWidget(self.user_combo, 1)
+        # === RIGHT CHAT AREA ===
+        chat_container = QWidget()
+        chat_layout = QVBoxLayout()
+        chat_layout.setContentsMargins(0, 0, 0, 0)
+        chat_layout.setSpacing(0)
+        chat_container.setLayout(chat_layout)
 
-        self.connect_btn = QPushButton("Select")
-        self.connect_btn.clicked.connect(self._select_target_from_combo)
-        row.addWidget(self.connect_btn)
+        # Chat header
+        chat_header = QFrame()
+        chat_header.setObjectName("card")
+        chat_header.setFixedHeight(70)
+        chat_header_layout = QHBoxLayout()
+        chat_header_layout.setContentsMargins(20, 10, 20, 10)
+        chat_header.setLayout(chat_header_layout)
 
-        self.layout().addLayout(row)
+        self.chat_title = QLabel("Select a user to start chatting")
+        self.chat_title.setStyleSheet("font-weight: 700; font-size: 16px; background:transparent;")
+        chat_header_layout.addWidget(self.chat_title)
+        chat_header_layout.addStretch()
 
-        # Chat history
-        self.chat_view = QTextBrowser()
-        self.chat_view.setStyleSheet("font-family: Consolas, monospace;")
-        self.layout().addWidget(self.chat_view, 1)
+        chat_layout.addWidget(chat_header)
 
-        # Composer
-        compose = QHBoxLayout()
-        self.msg_edit = QTextEdit()
-        self.msg_edit.setFixedHeight(70)
-        self.msg_edit.setPlaceholderText("Type message...")
-        compose.addWidget(self.msg_edit, 1)
+        # Chat messages area
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self.chat_widget = QWidget()
+        self.chat_layout = QVBoxLayout()
+        self.chat_layout.setSpacing(8)
+        self.chat_layout.setContentsMargins(20, 20, 20, 20)
+        self.chat_layout.addStretch()
+        self.chat_widget.setLayout(self.chat_layout)
+        self.scroll.setWidget(self.chat_widget)
+
+        chat_layout.addWidget(self.scroll, 1)
+
+        # Input area
+        input_frame = QFrame()
+        input_frame.setObjectName("card")
+        input_frame.setFixedHeight(100)
+        input_layout = QHBoxLayout()
+        input_layout.setContentsMargins(20, 15, 20, 15)
+        input_frame.setLayout(input_layout)
+
+        self.msg_input = QTextEdit()
+        self.msg_input.setPlaceholderText("Type a message...")
+        self.msg_input.setMaximumHeight(70)
+        input_layout.addWidget(self.msg_input, 1)
 
         self.send_btn = QPushButton("Send")
-        self.send_btn.clicked.connect(self._send_clicked)
-        compose.addWidget(self.send_btn)
+        self.send_btn.setFixedSize(80, 70)
+        self.send_btn.clicked.connect(self._send)
+        input_layout.addWidget(self.send_btn)
 
-        self.layout().addLayout(compose)
+        chat_layout.addWidget(input_frame)
 
-        self.status = QLabel("")
-        self.status.setStyleSheet("color: #666;")
-        self.layout().addWidget(self.status)
+        main_layout.addWidget(chat_container, 1)
 
-        self.timer = QTimer(self)
-        self.timer.setInterval(1000)
+        self.timer = QTimer()
         self.timer.timeout.connect(self._poll)
+        self.timer.setInterval(1000)
 
         self._set_enabled(False)
 
-    def start(self, auth: AuthContext) -> None:
+    def start(self, auth: AuthContext):
         self.auth = auth
-        self.me_label.setText(f"Logged in as: {auth.username}")
-        self.chat_view.clear()
-        self.seen_message_ids.clear()
-
-        self.target_user_id = None
-        self.target_username = None
+        self.user_label.setText(f"👤 {auth.username}")
+        self.seen.clear()
+        self.target_id = None
+        self.target_name = None
         self.target_pub = None
-
+        self._clear_chat()
         self._set_enabled(True)
         self.timer.start()
-        self.status.setText("Click Refresh users, select a user, then Select.")
-
-        # auto refresh once on entry
         self._refresh_users()
 
-    def stop(self) -> None:
+    def stop(self):
         self.timer.stop()
         self.auth = None
-        self.target_user_id = None
-        self.target_username = None
-        self.target_pub = None
         self._set_enabled(False)
-        self.chat_view.clear()
-        self.status.setText("")
-        self.user_combo.clear()
+        self._clear_chat()
+        self._clear_user_list()
 
-    def _set_enabled(self, enabled: bool) -> None:
-        self.refresh_users_btn.setEnabled(enabled)
-        self.user_combo.setEnabled(enabled)
-        self.connect_btn.setEnabled(enabled)
-        self.msg_edit.setEnabled(enabled)
-        self.send_btn.setEnabled(enabled)
-        self.logout_btn.setEnabled(enabled)
+    def _set_enabled(self, en: bool):
+        self.refresh_btn.setEnabled(en)
+        self.msg_input.setEnabled(en)
+        self.send_btn.setEnabled(en)
+        self.logout_btn.setEnabled(en)
 
-    def _logout_clicked(self) -> None:
-        if not self.auth:
-            return
-        try:
-            self.api.logout(self.auth.api_key)
-        except Exception as e:
-            # no silent pass — show info but still proceed locally
-            self.status.setText(f"Logout warning: {e}")
-    
-        self.stop()
-        self.on_logout()
-
-
-    # helper method 
-    def _handle_unauthorized_if_needed(self, exc: Exception) -> bool:
-        msg = str(exc)
-        if "401" in msg or "Unauthorized" in msg:
-            err(self, "Session expired", "Unauthorized (API key expired). Please login again.")
+    def _logout(self):
+        if self.auth:
+            try: self.api.logout(self.auth.api_key)
+            except: pass
             self.stop()
             self.on_logout()
-            return True
-        return False
 
+    def _clear_user_list(self):
+        while self.user_list_layout.count() > 1:
+            item = self.user_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.user_items.clear()
 
-    def _refresh_users(self) -> None:
-        """
-        Fetch /users and populate the combo.
-        We store user_id in Qt item data so we don't lose the mapping.
-        """
-        if not self.auth:
-            return
+    def _refresh_users(self):
+        if not self.auth: return
         try:
-            self.status.setText("Fetching users...")
             users = self.api.list_users(self.auth.api_key)
-    
-            self.user_combo.clear()
+            self._clear_user_list()
+
             if not users:
-                self.user_combo.addItem("(no other users)", None)
-                self.status.setText("No other users registered yet.")
-                return
-    
-            for u in users:
-                self.user_combo.addItem(u["username"], u["id"])
-    
-            self.status.setText(f"Loaded {len(users)} user(s). Select one and press Select.")
-        except Exception as e:
-            if self._handle_unauthorized_if_needed(e):
-                return
-            err(self, "Users fetch failed", str(e))
-            self.status.setText("")
-
-
-    def _append_message(self, username: str, raw_ts: str, text: str) -> None:
-        ts = self._pretty_ts(raw_ts)
-        self.chat_view.append(
-            f"<div><b>{self._escape(username)} - {self._escape(ts)}:</b><br>"
-            f"{self._escape(text)}</div><br>"
-        )
-
-    def _select_target_from_combo(self) -> None:
-        if not self.auth:
-            return
-    
-        target_id = self.user_combo.currentData()
-        target_name = self.user_combo.currentText()
-    
-        if not target_id:
-            warn(self, "No user", "No target user available to chat with.")
-            return
-    
-        try:
-            self.status.setText("Fetching target certificate...")
-            cert = self.api.get_user_cert(self.auth.api_key, str(target_id))
-            
-            # calling validation for certificate
-            if not validate_user_cert(cert, expected_username=target_name, ca_cert=STORAGE_CA_CERT):
-                raise RuntimeError("Target certificate validation failed (issuer/CN/time/signature).")
-
-            self.target_user_id = str(target_id)
-            self.target_username = target_name
-            self.target_pub = cert.public_key()
-    
-            # Reset UI for this chat view
-            self.chat_view.clear()
-            self.seen_message_ids.clear()
-            self._append_system(f"Selected chat target: {target_name}")
-    
-            # Load & render history ONCE (so poll won't re-print it)
-            self.status.setText("Loading chat history...")
-            msgs = self.api.receive_messages(self.auth.api_key, self.target_user_id)
-    
-            bad_count = 0
-    
-            for m in msgs:
-                mid = str(m.get("message_id", "")).strip()
-                if not mid:
-                    continue
-                if mid in self.seen_message_ids:
-                    continue
-    
-                try:
-                    ciphertext_blob = b64d_url(m["ciphertext"])
-                    enc_key = b64d_url(m["enc_key"])
-                    aes_key = rsa_decrypt_key(self.auth.private_key, enc_key)
-                    payload = decrypt_chat_payload(ciphertext_blob, aes_key)
-    
-                    sender = m.get("sender_username") or payload.get("sender", "?")
-                    text = payload.get("text", "")
-                    ts = m.get("timestamp") or payload.get("timestamp") or ""
-    
-                    # Mark as seen only after successful decrypt/parse
-                    self.seen_message_ids.add(mid)
-    
-                    # Signature verification (only when possible)
-                    sig = payload.get("signature")
-                    if sig and self.target_pub and self.target_username and sender == self.target_username:
-                        payload_for_verify = dict(payload)
-                        payload_for_verify.pop("signature", None)
-    
-                        if not verify_payload_signature(self.target_pub, payload_for_verify, sig):
-                            self._append_message(sender, ts, "[INVALID SIGNATURE] " + text)
-                            continue
-    
-                    self._append_message(sender, ts, text)
-    
-                except Exception:
-                    bad_count += 1
-                    continue
-    
-            if bad_count:
-                self.status.setText(
-                    f"Selected {target_name}. Loaded history (skipped {bad_count} invalid message(s))."
-                )
+                empty_label = QLabel("No other users online")
+                empty_label.setObjectName("subtitle")
+                empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                empty_label.setStyleSheet("padding: 20px;")
+                self.user_list_layout.insertWidget(0, empty_label)
             else:
-                self.status.setText(f"Selected {target_name}. You can send messages now.")
-
+                for u in users:
+                    item = UserListItem(u["id"], u["username"], self.dark_mode)
+                    item.clicked.connect(self._select_user)
+                    self.user_list_layout.insertWidget(self.user_list_layout.count() - 1, item)
+                    self.user_items.append(item)
         except Exception as e:
-            if self._handle_unauthorized_if_needed(e):
-                return
-            err(self, "Select failed", str(e))
-            self.status.setText("")
+            if "401" in str(e):
+                err(self, "Session Expired", "Please login again")
+                self.stop()
+                self.on_logout()
 
-
-    def _send_clicked(self) -> None:
-        if not self.auth:
-            return
-        if not self.target_user_id or not self.target_pub:
-            warn(self, "No target", "Select a user from the dropdown first.")
-            return
-
-        text = self.msg_edit.toPlainText().strip()
-        if not text:
-            return
-        self.msg_edit.clear()
+    def _select_user(self, uid: str, uname: str):
+        if not self.auth: return
 
         try:
-            # 1) Encrypt payload with random AES key
-            ciphertext_blob, aes_key = encrypt_chat_payload(
-                sender=self.auth.username,
-                recipient=self.target_username,
-                text=text,
-                sender_priv=self.auth.private_key,
-            )
+            cert = self.api.get_user_cert(self.auth.api_key, uid)
+            if not validate_user_cert(cert, uname, STORAGE_CA_CERT):
+                raise RuntimeError("Invalid certificate")
 
-            # 2) Encrypt AES key for sender (so sender can decrypt history)
-            sender_pub = self.auth.private_key.public_key()
-            enc_key_sender = rsa_encrypt_key(sender_pub, aes_key)
+            self.target_id = uid
+            self.target_name = uname
+            self.target_pub = cert.public_key()
+            self.chat_title.setText(f"💬 {uname}")
 
-            # 3) Encrypt AES key for receiver (so receiver can decrypt message)
-            enc_key_receiver = rsa_encrypt_key(self.target_pub, aes_key)
+            # Update selection in sidebar
+            for item in self.user_items:
+                item.set_selected(item.user_id == uid)
 
-            # 4) Build keys list expected by server
-            keys_payload = [
-                {
-                    "encryption_key": b64e_url(enc_key_sender),
-                    "user_id": self.auth.user_id,
-                },
-                {
-                    "encryption_key": b64e_url(enc_key_receiver),
-                    "user_id": self.target_user_id,
-                },
+            self._clear_chat()
+            self.seen.clear()
+            self._add_system(f"Chat with {uname}")
+
+            # Load history
+            msgs = self.api.receive_messages(self.auth.api_key, self.target_id)
+            for m in msgs:
+                mid = m.get("message_id", "")
+                if not mid or mid in self.seen: continue
+                try:
+                    ct = b64d_url(m["ciphertext"])
+                    ek = b64d_url(m["enc_key"])
+                    aes = rsa_decrypt_key(self.auth.private_key, ek)
+                    p = decrypt_chat_payload(ct, aes)
+
+                    sender = m.get("sender_username", "?")
+                    text = p.get("text", "")
+                    ts = self._fmt_ts(m.get("timestamp", ""))
+
+                    self.seen.add(mid)
+
+                    # Verify signature if from target
+                    sig = p.get("signature")
+                    if sig and self.target_pub and sender == self.target_name:
+                        pv = dict(p)
+                        pv.pop("signature", None)
+                        if not verify_payload_signature(self.target_pub, pv, sig):
+                            text = "[⚠️ INVALID SIG] " + text
+
+                    self._add_bubble(sender, ts, text, sender == self.auth.username)
+                except: continue
+        except Exception as e:
+            err(self, "Error", str(e))
+
+    def _send(self):
+        if not self.auth or not self.target_id or not self.target_pub: return
+        text = self.msg_input.toPlainText().strip()
+        if not text: return
+        self.msg_input.clear()
+
+        try:
+            ct, aes = encrypt_chat_payload(self.auth.username, self.target_name, text, self.auth.private_key)
+
+            ek_me = rsa_encrypt_key(self.auth.private_key.public_key(), aes)
+            ek_them = rsa_encrypt_key(self.target_pub, aes)
+
+            keys = [
+                {"encryption_key": b64e_url(ek_me), "user_id": self.auth.user_id},
+                {"encryption_key": b64e_url(ek_them), "user_id": self.target_id}
             ]
 
-            # 5) POST /messages/send
             ts = datetime.now(timezone.utc).isoformat()
-            self.api.send_message(
-                api_key=self.auth.api_key,
-                recipient_id=self.target_user_id,
-                ciphertext_blob=ciphertext_blob,
-                keys=keys_payload,
-                timestamp_iso=ts,
-            )
+            self.api.send_message(self.auth.api_key, self.target_id, ct, keys, ts)
 
-            self._append_me(text)
-            self.status.setText("Sent.")
+            self._add_bubble(self.auth.username, self._fmt_ts(ts), text, True)
         except Exception as e:
-            if self._handle_unauthorized_if_needed(e):
-                return
-            err(self, "Send failed", str(e))
-            self.status.setText("")
+            err(self, "Send Failed", str(e))
 
-
-    def _poll(self) -> None:
-        if not self.auth or not self.target_user_id:
-            return
-    
+    def _poll(self):
+        if not self.auth or not self.target_id: return
         try:
-            msgs = self.api.receive_messages(self.auth.api_key, self.target_user_id)
-        except Exception as e:
-            if self._handle_unauthorized_if_needed(e):
-                return
-            self.status.setText(f"Receive error: {e}")
-            return
+            msgs = self.api.receive_messages(self.auth.api_key, self.target_id)
+        except: return
 
-        new_count = 0
-    
         for m in msgs:
-            mid = str(m.get("message_id", "")).strip()
-            if not mid or mid in self.seen_message_ids:
-                continue
-    
+            mid = m.get("message_id", "")
+            if not mid or mid in self.seen: continue
             try:
-                ciphertext_blob = b64d_url(m["ciphertext"])
-                enc_key = b64d_url(m["enc_key"])
-                aes_key = rsa_decrypt_key(self.auth.private_key, enc_key)
-                payload = decrypt_chat_payload(ciphertext_blob, aes_key)
-    
-                sender = m.get("sender_username") or payload.get("sender", "?")
-                text = payload.get("text", "")
-    
-                # Prefer server timestamp; fallback to payload timestamp
-                raw_ts = m.get("timestamp") or payload.get("timestamp") or ""
-    
-                # Only mark as seen after successful decrypt/parse
-                self.seen_message_ids.add(mid)
-    
-                # Skip our own messages (we already show them on send)
-                if sender == self.auth.username:
-                    continue
-    
-                # -------------------------
-                # Signature verification (client-only)
-                # -------------------------
-                sig = payload.get("signature")
-                if sig and self.target_pub and self.target_username and sender == self.target_username:
-                    # Verify signature over payload without the signature field
-                    payload_for_verify = dict(payload)
-                    payload_for_verify.pop("signature", None)
-    
-                    if not verify_payload_signature(self.target_pub, payload_for_verify, sig):
-                        self._append_them(sender, raw_ts, "[INVALID SIGNATURE] " + text)
-                        new_count += 1
-                        continue
-    
-                # If there's no signature, or we can't verify, still display the message
-                self._append_them(sender, raw_ts, text)
-                new_count += 1
-    
-            except Exception as ex:
-                # Don't crash the poll loop; show a lightweight error
-                self.status.setText(f"Message decode/verify error: {ex}")
-                continue
-    
-        if new_count:
-            self.status.setText(f"Received {new_count} new message(s).")
+                ct = b64d_url(m["ciphertext"])
+                ek = b64d_url(m["enc_key"])
+                aes = rsa_decrypt_key(self.auth.private_key, ek)
+                p = decrypt_chat_payload(ct, aes)
 
+                sender = m.get("sender_username", "?")
+                text = p.get("text", "")
+                ts = self._fmt_ts(m.get("timestamp", ""))
 
-    # ---- rendering helpers ----
-    def _append_system(self, text: str) -> None:
-        self.chat_view.append(f"<div style='color:#666'>[system] {text}</div>")
+                self.seen.add(mid)
 
-    def _append_me(self, text: str) -> None:
-        me = self.auth.username if self.auth else "me"
-        raw_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        self._append_message(me, raw_ts, text)
-    
-    def _append_them(self, sender: str, raw_ts: str, text: str) -> None:
-        self._append_message(sender, raw_ts, text)
+                if sender == self.auth.username: continue
 
-        
-    def _pretty_ts(self, ts: str) -> str:
+                # Verify signature
+                sig = p.get("signature")
+                if sig and self.target_pub and sender == self.target_name:
+                    pv = dict(p)
+                    pv.pop("signature", None)
+                    if not verify_payload_signature(self.target_pub, pv, sig):
+                        text = "[⚠️ INVALID SIG] " + text
+
+                self._add_bubble(sender, ts, text, False)
+            except: continue
+
+    def _add_system(self, msg: str):
+        lbl = QLabel(f"<center><i style='color: #888;'>{msg}</i></center>")
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, lbl)
+
+    def _add_bubble(self, sender: str, ts: str, text: str, is_me: bool):
+        bubble = ChatBubble(sender, ts, text, is_me, self.dark_mode)
+
+        container = QWidget()
+        container_layout = QHBoxLayout()
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container.setLayout(container_layout)
+
+        if is_me:
+            container_layout.addStretch()
+            container_layout.addWidget(bubble)
+        else:
+            container_layout.addWidget(bubble)
+            container_layout.addStretch()
+
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, container)
+        QTimer.singleShot(50, lambda: self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum()))
+
+    def _clear_chat(self):
+        while self.chat_layout.count() > 1:
+            item = self.chat_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _fmt_ts(self, ts: str) -> str:
         try:
-            # handles "...+00:00" and also "Z"
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-        except Exception:
+            return dt.astimezone().strftime("%H:%M")
+        except:
             return ts
 
-
-    @staticmethod
-    def _escape(s: str) -> str:
-        return (
-            s.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\n", "<br>")
-        )
-
+    def update_theme(self, dark: bool):
+        self.dark_mode = dark
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("E2E Chat (PyQt6)")
-        self.resize(900, 600)
+        self.setWindowTitle("E2E Chat")
+        self.resize(1000, 700)
+        self.dark_mode = False
 
         self.api = ApiClient(SERVER_URL, SERVER_CERTIFICATE_PATH)
 
-        self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
+        # Menu bar
+        menubar = self.menuBar()
 
-        self.login_screen = LoginScreen(self.api, self._on_logged_in)
-        self.chat_screen = ChatScreen(self.api, self._on_logout)
+        # Theme toggle in menu
+        self.theme_toggle = ThemeToggle(self.dark_mode)
+        self.theme_toggle.toggled.connect(self._toggle_theme)
 
-        self.stack.addWidget(self.login_screen)
-        self.stack.addWidget(self.chat_screen)
-        self.stack.setCurrentWidget(self.login_screen)
+        theme_action = QWidgetAction(self)
+        theme_action.setDefaultWidget(self.theme_toggle)
+        menubar.addAction(theme_action)
 
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
-        self.menuBar().addAction(exit_action)
+        menubar.addAction(exit_action)
 
-    def _on_logged_in(self, auth: AuthContext) -> None:
+        # Stack
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
+
+        self.login_screen = LoginScreen(self.api, self._on_logged_in, self.dark_mode)
+        self.chat_screen = ChatScreen(self.api, self._on_logout, self.dark_mode)
+
+        self.stack.addWidget(self.login_screen)
+        self.stack.addWidget(self.chat_screen)
+
+        self._apply_theme()
+
+    def _toggle_theme(self, dark: bool):
+        self.dark_mode = dark
+        self.theme_toggle.set_dark_mode(dark)
+        self.chat_screen.update_theme(dark)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        self.setStyleSheet(get_stylesheet(self.dark_mode))
+
+    def _on_logged_in(self, auth: AuthContext):
         self.chat_screen.start(auth)
         self.stack.setCurrentWidget(self.chat_screen)
 
-    def _on_logout(self) -> None:
+    def _on_logout(self):
         self.stack.setCurrentWidget(self.login_screen)
 
-
-def main() -> None:
+def main():
     app = QApplication([])
-    w = MainWindow()
-    w.show()
-    app.exec()
+    app.setStyle('Fusion')
 
+    # Set app-wide font
+    font = QFont("-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif")
+    font.setPointSize(10)
+    app.setFont(font)
+
+    window = MainWindow()
+    window.show()
+    app.exec()
 
 if __name__ == "__main__":
     main()
