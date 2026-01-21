@@ -6,6 +6,7 @@ This reposity contains project for Network Security course at UNICA
 - Python 3.10+  
 - Docker & Docker Compose  
 - pip
+- fonts-noto-core
 
 ---
 
