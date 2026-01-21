@@ -475,7 +475,7 @@ async def users(current_user: User = Depends(get_current_user), db: AsyncSession
 
     return [
         {
-            "id": str(u.id),
+            "user_id": str(u.id),
             "username": u.username
         }
         for u in users
@@ -491,11 +491,8 @@ async def user_by_username(target_user: User = Depends(get_target_user), current
     return {
         "username": user.username,
         "public_key_cert": user.public_key_cert,
+        "user_id": str(user.id),
     }
-
-@app.get("/")
-def hello():
-    return {"message": "Hello, secure world!"}
 
 if __name__ == "__main__":
     # Paths to your certificate and private key

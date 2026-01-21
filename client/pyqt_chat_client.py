@@ -905,6 +905,10 @@ class ChatScreen(QWidget):
 
         main_layout.addWidget(chat_container, 1)
 
+        self.status = QLabel("")
+        self.status.setStyleSheet("color: #666;")
+        self.layout().addWidget(self.status)
+
         self.timer = QTimer()
         self.timer.timeout.connect(self._poll)
         self.timer.setInterval(1000)
@@ -943,6 +947,15 @@ class ChatScreen(QWidget):
             self.stop()
             self.on_logout()
 
+    def _handle_unauthorized_if_needed(self, exc: Exception) -> bool:
+        msg = str(exc)
+        if "401" in msg or "Unauthorized" in msg:
+            err(self, "Session expired", "Unauthorized (API key expired). Please login again.")
+            self.stop()
+            self.on_logout()
+            return True
+        return False
+
     def _clear_user_list(self):
         while self.user_list_layout.count() > 1:
             item = self.user_list_layout.takeAt(0)
@@ -964,15 +977,15 @@ class ChatScreen(QWidget):
                 self.user_list_layout.insertWidget(0, empty_label)
             else:
                 for u in users:
-                    item = UserListItem(u["id"], u["username"], self.dark_mode)
+                    item = UserListItem(u["user_id"], u["username"], self.dark_mode)
                     item.clicked.connect(self._select_user)
                     self.user_list_layout.insertWidget(self.user_list_layout.count() - 1, item)
                     self.user_items.append(item)
         except Exception as e:
-            if "401" in str(e):
-                err(self, "Session Expired", "Please login again")
-                self.stop()
-                self.on_logout()
+            if self._handle_unauthorized_if_needed(e):
+                return
+            err(self, "Users fetch failed", str(e))
+            self.status.setText("")
 
     def _select_user(self, uid: str, uname: str):
         if not self.auth: return
@@ -1047,17 +1060,29 @@ class ChatScreen(QWidget):
 
             self._add_bubble(self.auth.username, self._fmt_ts(ts), text, True)
         except Exception as e:
-            err(self, "Send Failed", str(e))
+            if self._handle_unauthorized_if_needed(e):
+                return
+            err(self, "Send failed", str(e))
+            self.status.setText("")
 
     def _poll(self):
-        if not self.auth or not self.target_id: return
+        if not self.auth or not self.target_id:
+            return
         try:
             msgs = self.api.receive_messages(self.auth.api_key, self.target_id)
-        except: return
+        except Exception as e:
+            if self._handle_unauthorized_if_needed(e):
+                return
+            self.status.setText(f"Receive error: {e}")
+            return
+
+        new_count = 0
 
         for m in msgs:
-            mid = m.get("message_id", "")
-            if not mid or mid in self.seen: continue
+            mid = str(m.get("message_id", "")).strip()
+            if not mid or mid in self.seen:
+                continue
+
             try:
                 ct = b64d_url(m["ciphertext"])
                 ek = b64d_url(m["enc_key"])
@@ -1070,7 +1095,8 @@ class ChatScreen(QWidget):
 
                 self.seen.add(mid)
 
-                if sender == self.auth.username: continue
+                if sender == self.auth.username:
+                    continue
 
                 # Verify signature
                 sig = p.get("signature")
@@ -1078,10 +1104,18 @@ class ChatScreen(QWidget):
                     pv = dict(p)
                     pv.pop("signature", None)
                     if not verify_payload_signature(self.target_pub, pv, sig):
-                        text = "[⚠️ INVALID SIG] " + text
+                        self._add_bubble(sender, ts, "[INVALID SIGNATURE] " + text)
+                        new_count += 1
+                        continue
 
                 self._add_bubble(sender, ts, text, False)
-            except: continue
+                new_count += 1
+            except Exception as ex:
+                # Don't crash the poll loop; show a lightweight error
+                self.status.setText(f"Message decode/verify error: {ex}")
+                continue
+            if new_count:
+                self.status.setText(f"Received {new_count} new message(s).")
 
     def _add_system(self, msg: str):
         lbl = QLabel(f"<center><i style='color: #888;'>{msg}</i></center>")
