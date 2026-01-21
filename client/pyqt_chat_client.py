@@ -79,6 +79,14 @@ PRIVATEKEY_STORAGE_PATH.mkdir(parents=True, exist_ok=True)
 
 SERVER_URL = f"https://{SERVER_ADDRESS}:{SERVER_PORT}"
 
+SERVER_STORAGE_CERTIFICATE_PATH = os.getenv("SERVER_STORAGE_CERTIFICATE_PATH", "../server/certs/storage_cert.pem")
+
+SERVER_STORAGE_CERTIFICATE_PATH = str((BASE_DIR / SERVER_STORAGE_CERTIFICATE_PATH).resolve())
+
+def load_storage_ca_cert() -> x509.Certificate:
+    return x509.load_pem_x509_certificate(Path(SERVER_STORAGE_CERTIFICATE_PATH).read_bytes())
+
+STORAGE_CA_CERT = load_storage_ca_cert()
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -336,19 +344,81 @@ def sign_api_key(private_key: RSAPrivateKey, timestamp_iso: str, api_key: str) -
     return b64e_url(signature)
 
 
-def encrypt_chat_payload(sender: str, recipient: str, text: str) -> tuple[bytes, bytes]:
-    """
-    Encrypt message payload using AES-CTR with random 256-bit key.
+def validate_user_cert(cert: x509.Certificate, expected_username: str, ca_cert: x509.Certificate) -> bool:
+    try:
+        # issuer check
+        if cert.issuer != ca_cert.subject:
+            return False
 
-    ciphertext_blob format: nonce(16) || ciphertext
-    """
+        # CN check
+        cn = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
+        if cn != expected_username:
+            return False
+
+        # time validity
+        now = datetime.now(timezone.utc)
+        if cert.not_valid_before_utc > now or cert.not_valid_after_utc < now:
+            return False
+
+        # signature verification (storage CA signs user certs)
+        ca_pub = ca_cert.public_key()
+        ca_pub.verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            padding.PKCS1v15(),
+            cert.signature_hash_algorithm,  # typically SHA256
+        )
+        return True
+
+    except Exception:
+        return False
+
+
+# encrypt helper methods
+def canonical_payload_bytes(payload: dict) -> bytes:
+    # stable bytes so signature verifies across machines
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def sign_payload(priv: RSAPrivateKey, payload: dict) -> str:
+    data = canonical_payload_bytes(payload)
+    sig = priv.sign(
+        data,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+        hashes.SHA256(),
+    )
+    return b64e_url(sig)
+
+
+def verify_payload_signature(pub: RSAPublicKey, payload: dict, sig_b64: str) -> bool:
+    try:
+        sig = b64d_url(sig_b64)
+        data = canonical_payload_bytes(payload)
+        pub.verify(
+            sig,
+            data,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+            hashes.SHA256(),
+        )
+        return True
+    except Exception:
+        return False
+
+#chat encryption
+
+def encrypt_chat_payload(sender: str, recipient: str, text: str, sender_priv: RSAPrivateKey) -> tuple[bytes, bytes]:
     payload = {
         "sender": sender,
         "recipient": recipient,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "text": text,
     }
-    plaintext = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    # IMPORTANT: sign payload WITHOUT signature field
+    sig = sign_payload(sender_priv, payload)
+    payload["signature"] = sig
+
+    plaintext = canonical_payload_bytes(payload)
 
     aes_key = os.urandom(32)
     nonce = os.urandom(16)
@@ -435,9 +505,16 @@ class LoginScreen(QWidget):
         self.status.setWordWrap(True)
         self.layout().addWidget(self.status)
 
-        self.login_btn = QPushButton("Register / Login")
+        self.register_btn = QPushButton("Register")
+        self.register_btn.clicked.connect(self._register_clicked)
+        
+        self.login_btn = QPushButton("Login")
         self.login_btn.clicked.connect(self._login_clicked)
-        self.layout().addWidget(self.login_btn)
+        
+        row = QHBoxLayout()
+        row.addWidget(self.register_btn)
+        row.addWidget(self.login_btn)
+        self.layout().addLayout(row)
 
         foot = QLabel(f"Server: {SERVER_URL} | Key storage: {PRIVATEKEY_STORAGE_PATH}")
         foot.setStyleSheet("color: #666; font-size: 11px;")
@@ -447,15 +524,71 @@ class LoginScreen(QWidget):
 
     def _set_busy(self, busy: bool, msg: str = "") -> None:
         self.login_btn.setEnabled(not busy)
+        self.register_btn.setEnabled(not busy)
         self.username_edit.setEnabled(not busy)
         self.password_edit.setEnabled(not busy)
         self.status.setText(msg)
+
+    def _register_clicked(self) -> None:
+        username = self.username_edit.text().strip()
+        password = self.password_edit.text()
+    
+        # --- username validation ---
+        if not username:
+            warn(self, "Missing username", "Please enter a username.")
+            return
+    
+        if len(username) > 32:
+            warn(self, "Invalid username", "Username must be at most 32 characters.")
+            return
+    
+        # alphanumeric only (letters+digits), no spaces, no underscores
+        if not username.isalnum():
+            warn(self, "Invalid username", "Username must be alphanumeric (letters and digits only).")
+            return
+    
+        # --- password validation ---
+        if not password:
+            warn(self, "Missing password", "Please enter a password for local private key encryption.")
+            return
+    
+        if len(password) < 10:
+            warn(self, "Weak password", "Password must be at least 10 characters.")
+            return
+    
+        try:
+            self._set_busy(True, "Generating/loading local keypair...")
+    
+            # Generate ONLY if missing; if exists, just load
+            priv, is_new = ensure_rsa_keypair(username, password)
+    
+            # Always build CSR and register (safe: server returns 200 or 409)
+            self._set_busy(True, "Building CSR and registering...")
+            csr_pem = build_csr(username, priv)
+            self.api.register_user(username, csr_pem)
+    
+            # Helpful UX messaging
+            if is_new:
+                self._set_busy(False, "Registered. You can now click Login.")
+                info(self, "Registered", "Registration completed. Now click Login.")
+            else:
+                self._set_busy(False, "Registration checked. You can now click Login.")
+                info(self, "Register", "User already had a local key. Registration checked/updated. Now click Login.")
+    
+        except Exception as e:
+            self._set_busy(False, "")
+            err(self, "Register failed", str(e))
 
     def _login_clicked(self) -> None:
         username = self.username_edit.text().strip()
         password = self.password_edit.text()
         
-        # --- username validation ---
+        # Key validation
+        if not private_key_path(username).exists():
+            warn(self, "Not registered locally", "No private key found. Click Register first.")
+            return
+        
+        # username validation
         if len(username) > 32:
             warn(self, "Invalid username", "Username must be at most 32 characters.")
             return
@@ -472,6 +605,12 @@ class LoginScreen(QWidget):
         if not password:
             warn(self, "Missing password", "Please enter a password for local private key encryption.")
             return
+        
+        # password check
+        if len(password) < 10:
+            warn(self, "Weak password", "Password must be at least 10 characters.")
+            return
+
 
         try:
             self._set_busy(True, "Generating/loading local keypair...")
@@ -626,10 +765,24 @@ class ChatScreen(QWidget):
             return
         try:
             self.api.logout(self.auth.api_key)
-        except Exception:
-            pass
+        except Exception as e:
+            # no silent pass — show info but still proceed locally
+            self.status.setText(f"Logout warning: {e}")
+    
         self.stop()
         self.on_logout()
+
+
+    # helper method 
+    def _handle_unauthorized_if_needed(self, exc: Exception) -> bool:
+        msg = str(exc)
+        if "401" in msg or "Unauthorized" in msg:
+            err(self, "Session expired", "Unauthorized (API key expired). Please login again.")
+            self.stop()
+            self.on_logout()
+            return True
+        return False
+
 
     def _refresh_users(self) -> None:
         """
@@ -641,20 +794,23 @@ class ChatScreen(QWidget):
         try:
             self.status.setText("Fetching users...")
             users = self.api.list_users(self.auth.api_key)
-
+    
             self.user_combo.clear()
             if not users:
                 self.user_combo.addItem("(no other users)", None)
                 self.status.setText("No other users registered yet.")
                 return
-
+    
             for u in users:
                 self.user_combo.addItem(u["username"], u["id"])
-
+    
             self.status.setText(f"Loaded {len(users)} user(s). Select one and press Select.")
         except Exception as e:
+            if self._handle_unauthorized_if_needed(e):
+                return
             err(self, "Users fetch failed", str(e))
             self.status.setText("")
+
 
     def _append_message(self, username: str, raw_ts: str, text: str) -> None:
         ts = self._pretty_ts(raw_ts)
@@ -677,7 +833,11 @@ class ChatScreen(QWidget):
         try:
             self.status.setText("Fetching target certificate...")
             cert = self.api.get_user_cert(self.auth.api_key, str(target_id))
-    
+            
+            # calling validation for certificate
+            if not validate_user_cert(cert, expected_username=target_name, ca_cert=STORAGE_CA_CERT):
+                raise RuntimeError("Target certificate validation failed (issuer/CN/time/signature).")
+
             self.target_user_id = str(target_id)
             self.target_username = target_name
             self.target_pub = cert.public_key()
@@ -687,30 +847,58 @@ class ChatScreen(QWidget):
             self.seen_message_ids.clear()
             self._append_system(f"Selected chat target: {target_name}")
     
-            # Immediately load & render history ONCE (so poll won't re-print it)
+            # Load & render history ONCE (so poll won't re-print it)
+            self.status.setText("Loading chat history...")
             msgs = self.api.receive_messages(self.auth.api_key, self.target_user_id)
+    
+            bad_count = 0
+    
             for m in msgs:
                 mid = str(m.get("message_id", "")).strip()
-                # idk if this happens
                 if not mid:
                     continue
-                self.seen_message_ids.add(mid)
+                if mid in self.seen_message_ids:
+                    continue
     
-                ciphertext_blob = b64d_url(m["ciphertext"])
-                enc_key = b64d_url(m["enc_key"])
-                aes_key = rsa_decrypt_key(self.auth.private_key, enc_key)
-                payload = decrypt_chat_payload(ciphertext_blob, aes_key)
+                try:
+                    ciphertext_blob = b64d_url(m["ciphertext"])
+                    enc_key = b64d_url(m["enc_key"])
+                    aes_key = rsa_decrypt_key(self.auth.private_key, enc_key)
+                    payload = decrypt_chat_payload(ciphertext_blob, aes_key)
     
-                sender = m.get("sender_username", payload.get("sender", "?"))
-                text = payload.get("text", "")
-                ts = m.get("timestamp", payload.get("timestamp", ""))
+                    sender = m.get("sender_username") or payload.get("sender", "?")
+                    text = payload.get("text", "")
+                    ts = m.get("timestamp") or payload.get("timestamp") or ""
     
-                # Render with your preferred format
-                self._append_message(sender, ts, text)
+                    # Mark as seen only after successful decrypt/parse
+                    self.seen_message_ids.add(mid)
+    
+                    # Signature verification (only when possible)
+                    sig = payload.get("signature")
+                    if sig and self.target_pub and self.target_username and sender == self.target_username:
+                        payload_for_verify = dict(payload)
+                        payload_for_verify.pop("signature", None)
+    
+                        if not verify_payload_signature(self.target_pub, payload_for_verify, sig):
+                            self._append_message(sender, ts, "[INVALID SIGNATURE] " + text)
+                            continue
+    
+                    self._append_message(sender, ts, text)
+    
+                except Exception:
+                    bad_count += 1
+                    continue
+    
+            if bad_count:
+                self.status.setText(
+                    f"Selected {target_name}. Loaded history (skipped {bad_count} invalid message(s))."
+                )
+            else:
+                self.status.setText(f"Selected {target_name}. You can send messages now.")
 
-            self.status.setText(f"Selected {target_name}. You can send messages now.")
-    
         except Exception as e:
+            if self._handle_unauthorized_if_needed(e):
+                return
             err(self, "Select failed", str(e))
             self.status.setText("")
 
@@ -733,6 +921,7 @@ class ChatScreen(QWidget):
                 sender=self.auth.username,
                 recipient=self.target_username,
                 text=text,
+                sender_priv=self.auth.private_key,
             )
 
             # 2) Encrypt AES key for sender (so sender can decrypt history)
@@ -767,8 +956,11 @@ class ChatScreen(QWidget):
             self._append_me(text)
             self.status.setText("Sent.")
         except Exception as e:
+            if self._handle_unauthorized_if_needed(e):
+                return
             err(self, "Send failed", str(e))
             self.status.setText("")
+
 
     def _poll(self) -> None:
         if not self.auth or not self.target_user_id:
@@ -777,38 +969,58 @@ class ChatScreen(QWidget):
         try:
             msgs = self.api.receive_messages(self.auth.api_key, self.target_user_id)
         except Exception as e:
+            if self._handle_unauthorized_if_needed(e):
+                return
             self.status.setText(f"Receive error: {e}")
             return
-    
+
         new_count = 0
+    
         for m in msgs:
             mid = str(m.get("message_id", "")).strip()
             if not mid or mid in self.seen_message_ids:
                 continue
-            self.seen_message_ids.add(mid)
     
             try:
                 ciphertext_blob = b64d_url(m["ciphertext"])
                 enc_key = b64d_url(m["enc_key"])
                 aes_key = rsa_decrypt_key(self.auth.private_key, enc_key)
-    
                 payload = decrypt_chat_payload(ciphertext_blob, aes_key)
     
-                sender = m.get("sender_username", payload.get("sender", "?"))
+                sender = m.get("sender_username") or payload.get("sender", "?")
                 text = payload.get("text", "")
     
-                # prefer server timestamp (it is authoritative for ordering),
-                # fallback to payload timestamp if missing
+                # Prefer server timestamp; fallback to payload timestamp
                 raw_ts = m.get("timestamp") or payload.get("timestamp") or ""
     
-                # skip our own messages (we already show them on send)
+                # Only mark as seen after successful decrypt/parse
+                self.seen_message_ids.add(mid)
+    
+                # Skip our own messages (we already show them on send)
                 if sender == self.auth.username:
                     continue
     
+                # -------------------------
+                # Signature verification (client-only)
+                # -------------------------
+                sig = payload.get("signature")
+                if sig and self.target_pub and self.target_username and sender == self.target_username:
+                    # Verify signature over payload without the signature field
+                    payload_for_verify = dict(payload)
+                    payload_for_verify.pop("signature", None)
+    
+                    if not verify_payload_signature(self.target_pub, payload_for_verify, sig):
+                        self._append_them(sender, raw_ts, "[INVALID SIGNATURE] " + text)
+                        new_count += 1
+                        continue
+    
+                # If there's no signature, or we can't verify, still display the message
                 self._append_them(sender, raw_ts, text)
                 new_count += 1
     
-            except Exception:
+            except Exception as ex:
+                # Don't crash the poll loop; show a lightweight error
+                self.status.setText(f"Message decode/verify error: {ex}")
                 continue
     
         if new_count:
