@@ -7,6 +7,7 @@ This reposity contains project for Network Security course at UNICA
 - Docker & Docker Compose  
 - pip
 - fonts-noto-core
+- fonts-noto-color-emoji
 
 ---
 
@@ -55,12 +56,14 @@ python3 server.py
 ```
 
 ### 9. PgAdmin
-I also deployed PgAdmin, so you can look at database data. To do so, visit http://localhost:5050/ and login using passwords from .env, then add server using data from .env and `postgres` as domain
+We also deployed PgAdmin, so you can look at database data. To do so, visit http://localhost:5050/ and login using passwords from .env, then add server using data from .env and `postgres` as domain
+
 ## Setup Instructions Client
 
-Run the following commands to generate SSL certificates, populate the environment file, start Docker services, create a Python virtual environment, install dependencies, and initialize the database:
+Run the following commands to create a Python virtual environment, install dependencies, and start the client:
+##  Setup Instructions Server
 
-### 1. Change to server directory
+### 1. Change to client directory
 ```bash
 cd client
 ```
@@ -82,9 +85,9 @@ source test-client-env/bin/activate
 pip3 install -r requirements.txt
 ```
 
-### 5. Start client (just test right now)
+### 5. Start client
 ```bash
-python3 crypto_client.py
+python3 pyqt_chat_client.py
 ```
 
 ## Termination instructions server
@@ -113,3 +116,6 @@ docker compose down -v
 ```bash
 deactivate
 ```
+
+## Testing script
+This repository also contains python script with some tests, for example some client spoofing and endpoint testing as well as sending message with invalid signature. The default user for this script is **spoof** and his private key password is **password123**. In the script, you need to change the legit user username, who will be ussed as recipient of message with invalid signature (default is **alice**)
