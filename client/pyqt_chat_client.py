@@ -160,23 +160,32 @@ class ApiClient:
         # requests verify expects a path to the server cert (for self-signed)
         verify_path = Path(verify_path)
         self.verify_path = str((BASE_DIR / verify_path).resolve()) if not verify_path.is_absolute() else str(verify_path)
-
+        
     # --------------------
     # AUTH / REGISTER
     # --------------------
-    def register_user(self, username: str, csr_pem: str) -> None:
+    def register_user(self, username: str, csr_pem: str) -> dict:
         """
         POST /register
-        body: {"username": "...", "csr": "-----BEGIN CERTIFICATE REQUEST-----..."}
+        Returns JSON on success: {"status","user_id","public_key_cert"}.
+        Raises RuntimeError with server detail on error.
         """
         payload = {"username": username, "csr": csr_pem}
         r = requests.post(f"{self.server_url}/register", json=payload, verify=self.verify_path)
-
-        # 200 OK = new user
-        # 409 CONFLICT = user exists -> fine for local demo
-        if r.status_code in (200, 409):
-            return
-        raise RuntimeError(f"Register failed: {r.status_code} {r.text}")
+        
+        ### DEBUG
+        print("VERIFY PATH:", self.verify_path)
+        print("EXISTS:", Path(self.verify_path).exists())
+        
+        if r.status_code == 200:
+            return r.json()
+    
+        try:
+            detail = r.json().get("detail", r.text)
+        except Exception:
+            detail = r.text
+    
+        raise RuntimeError(f"Register failed ({r.status_code}): {detail}")
 
     def get_api_key_encrypted(self, username: str) -> str:
         """
@@ -597,6 +606,25 @@ class LoginScreen(QWidget):
         self.login_btn.setEnabled(not busy)
         self.status.setText(msg)
 
+    # helper method
+    
+    def cert_pubkey_matches_private(cert: x509.Certificate, priv: RSAPrivateKey) -> bool:
+        cert_pub = cert.public_key()
+        local_pub = priv.public_key()
+    
+        if isinstance(cert_pub, rsa.RSAPublicKey) and isinstance(local_pub, rsa.RSAPublicKey):
+            return cert_pub.public_numbers() == local_pub.public_numbers()
+    
+        cert_bytes = cert_pub.public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        local_bytes = local_pub.public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        return cert_bytes == local_bytes
+
     def _register(self):
         username, password = self.username.text().strip(), self.password.text()
         if not username or not username.isalnum() or len(username) > 32:
@@ -610,14 +638,29 @@ class LoginScreen(QWidget):
             self._set_busy(True, "Building CSR and registering...")
             csr_pem = build_csr(username, priv)
             self.api.register_user(username, csr_pem)
+            
             # Helpful UX messaging
+            resp = self.api.register_user(username, csr_pem)
+
+            pem = (resp.get("public_key_cert") or "").encode("utf-8")
+            if not pem:
+                raise RuntimeError("Server did not return a certificate.")
+            
+            cert = x509.load_pem_x509_certificate(pem)
+            
+            if not validate_user_cert(cert, username, STORAGE_CA_CERT):
+                raise RuntimeError("Certificate validation failed (CA/CN/validity/signature).")
+            
+            if not cert_pubkey_matches_private(cert, priv):
+                raise RuntimeError("Certificate public key does not match the local private key.")
+            
             if is_new:
                 self._set_busy(False, "✓ Registered. You can now click Login.")
                 info(self, "Registered", "✓ Registration completed. Now click Login.")
             else:
                 self._set_busy(False, "Registration checked. You can now click Login.")
                 info(self, "Register", "User already had a local key. Registration checked/updated. Now click Login.")
-
+                
         except Exception as e:
             self._set_busy(False, "")
             err(self, "Register failed", str(e))
@@ -632,11 +675,6 @@ class LoginScreen(QWidget):
         try:
             self._set_busy(True, "Generating/loading local keypair...")
             priv, is_new = ensure_rsa_keypair(username, password)
-
-            if is_new:
-                self._set_busy(True, "Building CSR and registering...")
-                csr_pem = build_csr(username, priv)
-                self.api.register_user(username, csr_pem)
 
             self._set_busy(True, "Requesting API key...")
             encrypted_api = self.api.get_api_key_encrypted(username)
@@ -688,7 +726,7 @@ class ChatBubble(QFrame):
 
         if is_me:
             self.setMaximumWidth(400)
-            self.setContentsMargins(50, 4, 8, 4)
+            self.setContentsMargins(8, 4, 8, 4)
         else:
             self.setMaximumWidth(400)
             self.setContentsMargins(8, 4, 50, 4)
@@ -1160,7 +1198,7 @@ class ChatScreen(QWidget):
     def _fmt_ts(self, ts: str) -> str:
         try:
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            return dt.astimezone().strftime("%H:%M")
+            return dt.astimezone().strftime("%d.%m %H:%M")
         except:
             return ts
 

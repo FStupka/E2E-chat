@@ -182,7 +182,7 @@ def spoof_client_login(username, pk):
     assert response.status_code != 200, "wrong username didn't fail"
 
 
-def end_point_with_apikey(user_id):
+def end_point_with_apikey(api_key, user_id):
     endpoint_list = [
         ("users", False),
         (f"users/{user_id}",False),
@@ -190,9 +190,9 @@ def end_point_with_apikey(user_id):
         ("logout",True),
         ("messages/send", True),
     ]
-    test_api_key = base64.urlsafe_b64encode(os.urandom(16)).decode()
+
     headers = {
-        "x-api-key": test_api_key,
+        "x-api-key": api_key,
         "x-user-id": user_id
     }
     for endpoint, is_post in endpoint_list:
@@ -321,6 +321,14 @@ def load_pk(username):
         )
     return private_key
 
+def logout(api_key, user_id):
+    res = requests.post(
+        f"{SERVER_URL}/logout",
+        headers={"x-api-key": api_key, "x-user-id": user_id},
+        verify=server_transport_cert_path,
+    )
+    assert res.status_code == 200, f"/logout failed with {res.status_code}"
+
 if __name__ == "__main__":
     # set values for your test
     username = "spoof"
@@ -334,9 +342,10 @@ if __name__ == "__main__":
     spoof_client_login(username, spoof_pk)
 
     spoof_id, spoof_api =  legit_login(username, spoof_pk)
-
+    logout(spoof_api, spoof_id)
     # test api key endpoints
-    end_point_with_apikey(spoof_id)
+    end_point_with_apikey(spoof_api, spoof_id)
     # simulate invalid signature
+    spoof_id, spoof_api = legit_login(username, spoof_pk)
     legit_user = get_random_user(spoof_api, spoof_id, legit_username)
     send_invalid_signature_message(spoof_api,username, legit_username, spoof_id, spoof_pk, legit_user["public_key_cert"].public_key(), legit_user["user_id"])

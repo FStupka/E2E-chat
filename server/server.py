@@ -256,18 +256,19 @@ async def register(
     data: RegisterData,
     db: AsyncSession = Depends(get_db)
 ):
-    # Parse CSR
-    try:
-        csr = x509.load_pem_x509_csr(data.csr.encode("utf-8"))
-    except:
-        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Invalid public key format")
-    # Check if public key in CSR meets conditions
-    if not isinstance(csr.public_key(), rsa.RSAPublicKey) or csr.public_key().key_size != 4096:
-        raise HTTPException(status.HTTP_417_EXPECTATION_FAILED, "Public key if incorrect type")
-
     # Check username format
     if not data.username or not data.username.isalnum() or len(data.username) > 32:
         raise HTTPException(status.HTTP_417_EXPECTATION_FAILED, "Username format is wrong")
+    
+    # Parse CSR
+    try:
+        csr = x509.load_pem_x509_csr(data.csr.encode("utf-8"))
+    except Exception:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid CSR")   #payload is invalid
+    
+    # Check if public key in CSR meets conditions
+    if not isinstance(csr.public_key(), rsa.RSAPublicKey) or csr.public_key().key_size != 4096:
+        raise HTTPException(status.HTTP_417_EXPECTATION_FAILED, "Public key if incorrect type")
 
     # Check for username uniqueness
     result = await db.execute(
@@ -275,12 +276,31 @@ async def register(
     )
     user = result.scalar_one_or_none()
     if user:
-        raise HTTPException(status.HTTP_409_CONFLICT, "A user with this email is already registered")
+        raise HTTPException(status.HTTP_409_CONFLICT, "A user with this username is already registered")
 
-    # Check if username meets username in CSR
-    if (csr.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME) and
-            csr.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value != data.username):
-        raise HTTPException(status.HTTP_409_CONFLICT, "Not same username in CSR")
+    # Check if username meets username in CSR (CN must exist and must match username)
+    cn_attrs = csr.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
+    if not cn_attrs:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "CSR must contain CN")
+    if cn_attrs[0].value != data.username:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "CSR CN must match username")
+    
+    # Validate CSR signature (proof of private key ownership)
+    try:
+        if hasattr(csr, "is_signature_valid"):
+            if not csr.is_signature_valid:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "CSR signature invalid")
+        else:
+            csr.public_key().verify(
+                csr.signature,
+                csr.tbs_certrequest_bytes,
+                padding.PKCS1v15(),
+                csr.signature_hash_algorithm,
+            )
+    except InvalidSignature:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "CSR signature invalid")
+    except Exception:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "CSR signature invalid")
 
     # Create certificate
     not_before = datetime.now(timezone.utc)
@@ -317,8 +337,11 @@ async def register(
         await db.rollback()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Database error")
 
-    return {"status": "Registered"}
-
+    return {
+    "status": "Registered",
+    "user_id": str(user.id),
+    "public_key_cert": certificate_str,
+    }   
 
 # Get api key (login step 1)
 @app.post("/get_api")
