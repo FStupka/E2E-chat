@@ -205,32 +205,32 @@ class ApiClient:
             raise RuntimeError(f"authenticate failed: {r.status_code} {r.text}")
         return r.json()
 
-    def logout(self, api_key: str) -> None:
-        r = requests.post(f"{self.server_url}/logout", headers={"x-api-key": api_key}, verify=self.verify_path)
+    def logout(self, api_key: str, user_id: str) -> None:
+        r = requests.post(f"{self.server_url}/logout", headers={"x-api-key": api_key, "x-user-id": user_id}, verify=self.verify_path)
         if r.status_code != 200:
             raise RuntimeError(f"logout failed: {r.status_code} {r.text}")
 
     # --------------------
     # USERS
     # --------------------
-    def list_users(self, api_key: str) -> list[dict]:
+    def list_users(self, api_key: str, user_id: str) -> list[dict]:
         """
         GET /users
         returns list of {"id": "...", "username": "..."} excluding current user.
         """
-        r = requests.get(f"{self.server_url}/users", headers={"x-api-key": api_key}, verify=self.verify_path)
+        r = requests.get(f"{self.server_url}/users", headers={"x-api-key": api_key, "x-user-id": user_id}, verify=self.verify_path)
         if r.status_code != 200:
             raise RuntimeError(f"/users failed: {r.status_code} {r.text}")
         return r.json()
 
-    def get_user_cert(self, api_key: str, user_id: str) -> x509.Certificate:
+    def get_user_cert(self, api_key: str, user_id: str, target_id: str) -> x509.Certificate:
         """
         Server route should be: /users/{user_id}
         """
-        path = f"/users/{user_id}"
+        path = f"/users/{target_id}"
         r = requests.get(
             f"{self.server_url}{path}",
-            headers={"x-api-key": api_key},
+            headers={"x-api-key": api_key, "x-user-id": user_id},
             verify=self.verify_path,
         )
 
@@ -246,6 +246,7 @@ class ApiClient:
     def send_message(
         self,
         api_key: str,
+        user_id: str,
         recipient_id: str,
         ciphertext_blob: bytes,
         keys: list[dict],
@@ -270,13 +271,13 @@ class ApiClient:
         r = requests.post(
             f"{self.server_url}/messages/send",
             json=payload,
-            headers={"x-api-key": api_key},
+            headers={"x-api-key": api_key, "x-user-id": user_id},
             verify=self.verify_path,
         )
         if r.status_code != 200:
             raise RuntimeError(f"send failed: {r.status_code} {r.text}")
 
-    def receive_messages(self, api_key: str, target_user_id: str) -> list[dict]:
+    def receive_messages(self, api_key: str, user_id: str, target_user_id: str) -> list[dict]:
         """
         GET /messages/{user_id}
         returns list of:
@@ -290,7 +291,7 @@ class ApiClient:
         """
         r = requests.get(
             f"{self.server_url}/messages/{target_user_id}",
-            headers={"x-api-key": api_key},
+            headers={"x-api-key": api_key, "x-user-id": user_id},
             verify=self.verify_path,
         )
         if r.status_code != 200:
@@ -942,7 +943,7 @@ class ChatScreen(QWidget):
 
     def _logout(self):
         if self.auth:
-            try: self.api.logout(self.auth.api_key)
+            try: self.api.logout(self.auth.api_key, self.auth.user_id)
             except: pass
             self.stop()
             self.on_logout()
@@ -966,7 +967,7 @@ class ChatScreen(QWidget):
     def _refresh_users(self):
         if not self.auth: return
         try:
-            users = self.api.list_users(self.auth.api_key)
+            users = self.api.list_users(self.auth.api_key, self.auth.user_id)
             self._clear_user_list()
 
             if not users:
@@ -998,7 +999,7 @@ class ChatScreen(QWidget):
         if not self.auth: return
 
         try:
-            cert = self.api.get_user_cert(self.auth.api_key, uid)
+            cert = self.api.get_user_cert(self.auth.api_key, self.auth.user_id, uid)
             if not validate_user_cert(cert, uname, STORAGE_CA_CERT):
                 raise RuntimeError("Invalid certificate")
 
@@ -1016,7 +1017,7 @@ class ChatScreen(QWidget):
             self._add_system(f"Chat with {uname}")
 
             # Load history
-            msgs = self.api.receive_messages(self.auth.api_key, self.target_id)
+            msgs = self.api.receive_messages(self.auth.api_key, self.auth.user_id, self.target_id)
             for m in msgs:
                 mid = m.get("message_id", "")
                 if not mid or mid in self.seen: continue
@@ -1026,7 +1027,7 @@ class ChatScreen(QWidget):
                     aes = rsa_decrypt_key(self.auth.private_key, ek)
                     p = decrypt_chat_payload(ct, aes)
 
-                    sender = m.get("sender_username", "?")
+                    sender = p.get("sender", "?")
                     text = p.get("text", "")
                     ts = self._fmt_ts(m.get("timestamp", ""))
 
@@ -1063,7 +1064,7 @@ class ChatScreen(QWidget):
             ]
 
             ts = datetime.now(timezone.utc).isoformat()
-            self.api.send_message(self.auth.api_key, self.target_id, ct, keys, ts)
+            self.api.send_message(self.auth.api_key, self.auth.user_id, self.target_id, ct, keys, ts)
 
             self._add_bubble(self.auth.username, self._fmt_ts(ts), text, True)
         except Exception as e:
@@ -1076,7 +1077,7 @@ class ChatScreen(QWidget):
         if not self.auth or not self.target_id:
             return
         try:
-            msgs = self.api.receive_messages(self.auth.api_key, self.target_id)
+            msgs = self.api.receive_messages(self.auth.api_key, self.auth.user_id, self.target_id)
         except Exception as e:
             if self._handle_unauthorized_if_needed(e):
                 return
@@ -1096,7 +1097,7 @@ class ChatScreen(QWidget):
                 aes = rsa_decrypt_key(self.auth.private_key, ek)
                 p = decrypt_chat_payload(ct, aes)
 
-                sender = m.get("sender_username", "?")
+                sender = p.get("sender", "?")
                 text = p.get("text", "")
                 ts = self._fmt_ts(m.get("timestamp", ""))
 

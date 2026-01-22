@@ -192,7 +192,8 @@ def end_point_with_apikey(user_id):
     ]
     test_api_key = base64.urlsafe_b64encode(os.urandom(16)).decode()
     headers = {
-        "x-api-key": test_api_key
+        "x-api-key": test_api_key,
+        "x-user-id": user_id
     }
     for endpoint, is_post in endpoint_list:
         if is_post:
@@ -209,8 +210,8 @@ def end_point_with_apikey(user_id):
             response = requests.get(f"{SERVER_URL}/{endpoint}", verify=server_transport_cert_path)
         assert response.status_code != 200, f"Endpoint {endpoint} API KEY requirement failed."
 
-def get_random_user(api_key, username=None):
-    r = requests.get(f"{SERVER_URL}/users", headers={"x-api-key": api_key}, verify=server_transport_cert_path)
+def get_random_user(api_key, user_id, username=None):
+    r = requests.get(f"{SERVER_URL}/users", headers={"x-api-key": api_key, "x-user-id": user_id}, verify=server_transport_cert_path)
     if r.status_code != 200:
         assert False, f"/users failed with {r.status_code}"
     users = r.json()
@@ -221,7 +222,7 @@ def get_random_user(api_key, username=None):
         if u["username"] == username:
             user = u
             break
-    r = requests.get(f"{SERVER_URL}/users/{user['user_id']}", headers={"x-api-key": api_key}, verify=server_transport_cert_path)
+    r = requests.get(f"{SERVER_URL}/users/{user['user_id']}", headers={"x-api-key": api_key,  "x-user-id": user_id}, verify=server_transport_cert_path)
     assert r.status_code == 200, f"/users/user_id failed with {r.status_code}"
     res = r.json()
     pem = r.json()["public_key_cert"].encode("utf-8")
@@ -307,7 +308,7 @@ def send_invalid_signature_message(api_key, sender, recipient, sender_id, sender
     r = requests.post(
         f"{SERVER_URL}/messages/send",
         json=payload,
-        headers={"x-api-key": api_key},
+        headers={"x-api-key": api_key,  "x-user-id": sender_id},
         verify=server_transport_cert_path,
     )
     assert r.status_code == 200, f"/messages/send failed with {r.status_code}"
@@ -337,5 +338,5 @@ if __name__ == "__main__":
     # test api key endpoints
     end_point_with_apikey(spoof_id)
     # simulate invalid signature
-    legit_user = get_random_user(spoof_api, legit_username)
+    legit_user = get_random_user(spoof_api, spoof_id, legit_username)
     send_invalid_signature_message(spoof_api,username, legit_username, spoof_id, spoof_pk, legit_user["public_key_cert"].public_key(), legit_user["user_id"])
