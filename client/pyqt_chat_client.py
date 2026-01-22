@@ -160,23 +160,32 @@ class ApiClient:
         # requests verify expects a path to the server cert (for self-signed)
         verify_path = Path(verify_path)
         self.verify_path = str((BASE_DIR / verify_path).resolve()) if not verify_path.is_absolute() else str(verify_path)
-
+        
     # --------------------
     # AUTH / REGISTER
     # --------------------
-    def register_user(self, username: str, csr_pem: str) -> None:
+    def register_user(self, username: str, csr_pem: str) -> dict:
         """
         POST /register
-        body: {"username": "...", "csr": "-----BEGIN CERTIFICATE REQUEST-----..."}
+        Returns JSON on success: {"status","user_id","public_key_cert"}.
+        Raises RuntimeError with server detail on error.
         """
         payload = {"username": username, "csr": csr_pem}
         r = requests.post(f"{self.server_url}/register", json=payload, verify=self.verify_path)
-
-        # 200 OK = new user
-        # 409 CONFLICT = user exists -> fine for local demo
-        if r.status_code in (200, 409):
-            return
-        raise RuntimeError(f"Register failed: {r.status_code} {r.text}")
+        
+        ### DEBUG
+        print("VERIFY PATH:", self.verify_path)
+        print("EXISTS:", Path(self.verify_path).exists())
+        
+        if r.status_code == 200:
+            return r.json()
+    
+        try:
+            detail = r.json().get("detail", r.text)
+        except Exception:
+            detail = r.text
+    
+        raise RuntimeError(f"Register failed ({r.status_code}): {detail}")
 
     def get_api_key_encrypted(self, username: str) -> str:
         """
@@ -205,32 +214,32 @@ class ApiClient:
             raise RuntimeError(f"authenticate failed: {r.status_code} {r.text}")
         return r.json()
 
-    def logout(self, api_key: str) -> None:
-        r = requests.post(f"{self.server_url}/logout", headers={"x-api-key": api_key}, verify=self.verify_path)
+    def logout(self, api_key: str, user_id: str) -> None:
+        r = requests.post(f"{self.server_url}/logout", headers={"x-api-key": api_key, "x-user-id": user_id}, verify=self.verify_path)
         if r.status_code != 200:
             raise RuntimeError(f"logout failed: {r.status_code} {r.text}")
 
     # --------------------
     # USERS
     # --------------------
-    def list_users(self, api_key: str) -> list[dict]:
+    def list_users(self, api_key: str, user_id: str) -> list[dict]:
         """
         GET /users
         returns list of {"id": "...", "username": "..."} excluding current user.
         """
-        r = requests.get(f"{self.server_url}/users", headers={"x-api-key": api_key}, verify=self.verify_path)
+        r = requests.get(f"{self.server_url}/users", headers={"x-api-key": api_key, "x-user-id": user_id}, verify=self.verify_path)
         if r.status_code != 200:
             raise RuntimeError(f"/users failed: {r.status_code} {r.text}")
         return r.json()
 
-    def get_user_cert(self, api_key: str, user_id: str) -> x509.Certificate:
+    def get_user_cert(self, api_key: str, user_id: str, target_id: str) -> x509.Certificate:
         """
         Server route should be: /users/{user_id}
         """
-        path = f"/users/{user_id}"
+        path = f"/users/{target_id}"
         r = requests.get(
             f"{self.server_url}{path}",
-            headers={"x-api-key": api_key},
+            headers={"x-api-key": api_key, "x-user-id": user_id},
             verify=self.verify_path,
         )
 
@@ -246,6 +255,7 @@ class ApiClient:
     def send_message(
         self,
         api_key: str,
+        user_id: str,
         recipient_id: str,
         ciphertext_blob: bytes,
         keys: list[dict],
@@ -270,13 +280,13 @@ class ApiClient:
         r = requests.post(
             f"{self.server_url}/messages/send",
             json=payload,
-            headers={"x-api-key": api_key},
+            headers={"x-api-key": api_key, "x-user-id": user_id},
             verify=self.verify_path,
         )
         if r.status_code != 200:
             raise RuntimeError(f"send failed: {r.status_code} {r.text}")
 
-    def receive_messages(self, api_key: str, target_user_id: str) -> list[dict]:
+    def receive_messages(self, api_key: str, user_id: str, target_user_id: str) -> list[dict]:
         """
         GET /messages/{user_id}
         returns list of:
@@ -290,7 +300,7 @@ class ApiClient:
         """
         r = requests.get(
             f"{self.server_url}/messages/{target_user_id}",
-            headers={"x-api-key": api_key},
+            headers={"x-api-key": api_key, "x-user-id": user_id},
             verify=self.verify_path,
         )
         if r.status_code != 200:
@@ -436,11 +446,11 @@ def verify_payload_signature(pub: RSAPublicKey, payload: dict, sig_b64: str) -> 
 
 #chat encryption
 
-def encrypt_chat_payload(sender: str, recipient: str, text: str, sender_priv: RSAPrivateKey) -> tuple[bytes, bytes]:
+def encrypt_chat_payload(sender: str, recipient: str, text: str, timestamp: str, sender_priv: RSAPrivateKey) -> tuple[bytes, bytes]:
     payload = {
         "sender": sender,
         "recipient": recipient,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": timestamp,
         "text": text,
     }
 
@@ -596,6 +606,25 @@ class LoginScreen(QWidget):
         self.login_btn.setEnabled(not busy)
         self.status.setText(msg)
 
+    # helper method
+    
+    def cert_pubkey_matches_private(cert: x509.Certificate, priv: RSAPrivateKey) -> bool:
+        cert_pub = cert.public_key()
+        local_pub = priv.public_key()
+    
+        if isinstance(cert_pub, rsa.RSAPublicKey) and isinstance(local_pub, rsa.RSAPublicKey):
+            return cert_pub.public_numbers() == local_pub.public_numbers()
+    
+        cert_bytes = cert_pub.public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        local_bytes = local_pub.public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        return cert_bytes == local_bytes
+
     def _register(self):
         username, password = self.username.text().strip(), self.password.text()
         if not username or not username.isalnum() or len(username) > 32:
@@ -609,14 +638,29 @@ class LoginScreen(QWidget):
             self._set_busy(True, "Building CSR and registering...")
             csr_pem = build_csr(username, priv)
             self.api.register_user(username, csr_pem)
+            
             # Helpful UX messaging
+            resp = self.api.register_user(username, csr_pem)
+
+            pem = (resp.get("public_key_cert") or "").encode("utf-8")
+            if not pem:
+                raise RuntimeError("Server did not return a certificate.")
+            
+            cert = x509.load_pem_x509_certificate(pem)
+            
+            if not validate_user_cert(cert, username, STORAGE_CA_CERT):
+                raise RuntimeError("Certificate validation failed (CA/CN/validity/signature).")
+            
+            if not cert_pubkey_matches_private(cert, priv):
+                raise RuntimeError("Certificate public key does not match the local private key.")
+            
             if is_new:
                 self._set_busy(False, "✓ Registered. You can now click Login.")
                 info(self, "Registered", "✓ Registration completed. Now click Login.")
             else:
                 self._set_busy(False, "Registration checked. You can now click Login.")
                 info(self, "Register", "User already had a local key. Registration checked/updated. Now click Login.")
-
+                
         except Exception as e:
             self._set_busy(False, "")
             err(self, "Register failed", str(e))
@@ -631,11 +675,6 @@ class LoginScreen(QWidget):
         try:
             self._set_busy(True, "Generating/loading local keypair...")
             priv, is_new = ensure_rsa_keypair(username, password)
-
-            if is_new:
-                self._set_busy(True, "Building CSR and registering...")
-                csr_pem = build_csr(username, priv)
-                self.api.register_user(username, csr_pem)
 
             self._set_busy(True, "Requesting API key...")
             encrypted_api = self.api.get_api_key_encrypted(username)
@@ -687,7 +726,7 @@ class ChatBubble(QFrame):
 
         if is_me:
             self.setMaximumWidth(400)
-            self.setContentsMargins(50, 4, 8, 4)
+            self.setContentsMargins(8, 4, 8, 4)
         else:
             self.setMaximumWidth(400)
             self.setContentsMargins(8, 4, 50, 4)
@@ -942,7 +981,7 @@ class ChatScreen(QWidget):
 
     def _logout(self):
         if self.auth:
-            try: self.api.logout(self.auth.api_key)
+            try: self.api.logout(self.auth.api_key, self.auth.user_id)
             except: pass
             self.stop()
             self.on_logout()
@@ -966,7 +1005,7 @@ class ChatScreen(QWidget):
     def _refresh_users(self):
         if not self.auth: return
         try:
-            users = self.api.list_users(self.auth.api_key)
+            users = self.api.list_users(self.auth.api_key, self.auth.user_id)
             self._clear_user_list()
 
             if not users:
@@ -998,7 +1037,7 @@ class ChatScreen(QWidget):
         if not self.auth: return
 
         try:
-            cert = self.api.get_user_cert(self.auth.api_key, uid)
+            cert = self.api.get_user_cert(self.auth.api_key, self.auth.user_id, uid)
             if not validate_user_cert(cert, uname, STORAGE_CA_CERT):
                 raise RuntimeError("Invalid certificate")
 
@@ -1016,7 +1055,7 @@ class ChatScreen(QWidget):
             self._add_system(f"Chat with {uname}")
 
             # Load history
-            msgs = self.api.receive_messages(self.auth.api_key, self.target_id)
+            msgs = self.api.receive_messages(self.auth.api_key, self.auth.user_id, self.target_id)
             for m in msgs:
                 mid = m.get("message_id", "")
                 if not mid or mid in self.seen: continue
@@ -1026,7 +1065,7 @@ class ChatScreen(QWidget):
                     aes = rsa_decrypt_key(self.auth.private_key, ek)
                     p = decrypt_chat_payload(ct, aes)
 
-                    sender = m.get("sender_username", "?")
+                    sender = p.get("sender", "?")
                     text = p.get("text", "")
                     ts = self._fmt_ts(m.get("timestamp", ""))
 
@@ -1034,12 +1073,14 @@ class ChatScreen(QWidget):
 
                     # Verify signature if from target
                     sig = p.get("signature")
-                    if sig and self.target_pub and sender == self.target_name:
+                    if sig and self.target_pub:
+                        pub_key = self.target_pub if sender != self.auth.username else self.auth.private_key.public_key()
                         pv = dict(p)
                         pv.pop("signature", None)
-                        if not verify_payload_signature(self.target_pub, pv, sig):
+                        if not verify_payload_signature(pub_key, pv, sig):
                             text = "[⚠️ INVALID SIG] " + text
-
+                    else:
+                        text = "[⚠️ NO SIG/TARGET PUB] " + text
                     self._add_bubble(sender, ts, text, sender == self.auth.username)
                 except: continue
         except Exception as e:
@@ -1052,7 +1093,9 @@ class ChatScreen(QWidget):
         self.msg_input.clear()
 
         try:
-            ct, aes = encrypt_chat_payload(self.auth.username, self.target_name, text, self.auth.private_key)
+            ts = datetime.now(timezone.utc).isoformat()
+
+            ct, aes = encrypt_chat_payload(self.auth.username, self.target_name, text, ts, self.auth.private_key)
 
             ek_me = rsa_encrypt_key(self.auth.private_key.public_key(), aes)
             ek_them = rsa_encrypt_key(self.target_pub, aes)
@@ -1062,8 +1105,8 @@ class ChatScreen(QWidget):
                 {"encryption_key": b64e_url(ek_them), "user_id": self.target_id}
             ]
 
-            ts = datetime.now(timezone.utc).isoformat()
-            self.api.send_message(self.auth.api_key, self.target_id, ct, keys, ts)
+
+            self.api.send_message(self.auth.api_key, self.auth.user_id, self.target_id, ct, keys, ts)
 
             self._add_bubble(self.auth.username, self._fmt_ts(ts), text, True)
         except Exception as e:
@@ -1076,7 +1119,7 @@ class ChatScreen(QWidget):
         if not self.auth or not self.target_id:
             return
         try:
-            msgs = self.api.receive_messages(self.auth.api_key, self.target_id)
+            msgs = self.api.receive_messages(self.auth.api_key, self.auth.user_id, self.target_id)
         except Exception as e:
             if self._handle_unauthorized_if_needed(e):
                 return
@@ -1096,7 +1139,7 @@ class ChatScreen(QWidget):
                 aes = rsa_decrypt_key(self.auth.private_key, ek)
                 p = decrypt_chat_payload(ct, aes)
 
-                sender = m.get("sender_username", "?")
+                sender = p.get("sender", "?")
                 text = p.get("text", "")
                 ts = self._fmt_ts(m.get("timestamp", ""))
 
@@ -1111,11 +1154,11 @@ class ChatScreen(QWidget):
                     pv = dict(p)
                     pv.pop("signature", None)
                     if not verify_payload_signature(self.target_pub, pv, sig):
-                        self._add_bubble(sender, ts, "[INVALID SIGNATURE] " + text)
+                        self._add_bubble(sender, ts, "[⚠️ INVALID SIG] " + text, sender == self.auth.username)
                         new_count += 1
                         continue
 
-                self._add_bubble(sender, ts, text, False)
+                self._add_bubble(sender, ts, text, sender == self.auth.username)
                 new_count += 1
             except Exception as ex:
                 # Don't crash the poll loop; show a lightweight error
@@ -1155,7 +1198,7 @@ class ChatScreen(QWidget):
     def _fmt_ts(self, ts: str) -> str:
         try:
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            return dt.astimezone().strftime("%H:%M")
+            return dt.astimezone().strftime("%d.%m %H:%M")
         except:
             return ts
 
