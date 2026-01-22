@@ -588,7 +588,7 @@ async def receive_messages(
 
 # List users
 @app.get("/users")
-async def users(
+async def get_users(
     authenticated_user: User = Depends(get_authenticated_user),
     db: AsyncSession = Depends(get_db)
 ):

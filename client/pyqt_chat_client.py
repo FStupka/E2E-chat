@@ -24,7 +24,6 @@ import base64, json, os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 import requests
 from dotenv import load_dotenv
 from cryptography import x509
@@ -604,7 +603,7 @@ class LoginScreen(QWidget):
 
     # helper method
     
-    def cert_pubkey_matches_private(cert: x509.Certificate, priv: RSAPrivateKey) -> bool:
+    def cert_pubkey_matches_private(self, cert: x509.Certificate, priv: RSAPrivateKey) -> bool:
         cert_pub = cert.public_key()
         local_pub = priv.public_key()
     
@@ -633,7 +632,6 @@ class LoginScreen(QWidget):
             priv, is_new = ensure_rsa_keypair(username, password)
             self._set_busy(True, "Building CSR and registering...")
             csr_pem = build_csr(username, priv)
-            self.api.register_user(username, csr_pem)
             
             # Helpful UX messaging
             resp = self.api.register_user(username, csr_pem)
@@ -647,7 +645,7 @@ class LoginScreen(QWidget):
             if not validate_user_cert(cert, username, STORAGE_CA_CERT):
                 raise RuntimeError("Certificate validation failed (CA/CN/validity/signature).")
             
-            if not cert_pubkey_matches_private(cert, priv):
+            if not self.cert_pubkey_matches_private(cert, priv):
                 raise RuntimeError("Certificate public key does not match the local private key.")
             
             if is_new:
