@@ -37,7 +37,7 @@ class User(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     username = Column(Text, unique=True, nullable=False)
     public_key_cert = Column(Text, nullable=False)
-    api_key_hash = Column(Text, unique=True, nullable=False)
+    api_key_dk = Column(Text, unique=True, nullable=False)
     api_key_expires = Column(DateTime(timezone=True), nullable=True)
     api_key_created = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
