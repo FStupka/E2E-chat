@@ -59,7 +59,7 @@ def generate_keypair(username: str):
         "csr": csr_pem_str
     }
     response = requests.post(f"{SERVER_URL}/register", json=payload, verify=server_transport_cert_path)
-    print(response, response.text)
+    
     if response.status_code != 200:
         return None
     with open(privatekey_storage/ f"{username}_private.pem", "wb") as priv_file:

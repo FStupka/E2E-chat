@@ -38,7 +38,7 @@ from PyQt6.QtGui import QFont, QIcon, QPalette, QColor, QPainter, QLinearGradien
 from PyQt6.QtWidgets import *
 
 #
-# ==# ---------------------------------------------------------------------------
+# # ---------------------------------------------------------------------------
 # # Environment / paths
 # # ---------------------------------------------------------------------------
 
@@ -172,10 +172,6 @@ class ApiClient:
         """
         payload = {"username": username, "csr": csr_pem}
         r = requests.post(f"{self.server_url}/register", json=payload, verify=self.verify_path)
-        
-        ### DEBUG
-        print("VERIFY PATH:", self.verify_path)
-        print("EXISTS:", Path(self.verify_path).exists())
         
         if r.status_code == 200:
             return r.json()
