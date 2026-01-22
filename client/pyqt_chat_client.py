@@ -437,11 +437,11 @@ def verify_payload_signature(pub: RSAPublicKey, payload: dict, sig_b64: str) -> 
 
 #chat encryption
 
-def encrypt_chat_payload(sender: str, recipient: str, text: str, sender_priv: RSAPrivateKey) -> tuple[bytes, bytes]:
+def encrypt_chat_payload(sender: str, recipient: str, text: str, timestamp: str, sender_priv: RSAPrivateKey) -> tuple[bytes, bytes]:
     payload = {
         "sender": sender,
         "recipient": recipient,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": timestamp,
         "text": text,
     }
 
@@ -1035,12 +1035,14 @@ class ChatScreen(QWidget):
 
                     # Verify signature if from target
                     sig = p.get("signature")
-                    if sig and self.target_pub and sender == self.target_name:
+                    if sig and self.target_pub:
+                        pub_key = self.target_pub if sender != self.auth.username else self.auth.private_key.public_key()
                         pv = dict(p)
                         pv.pop("signature", None)
-                        if not verify_payload_signature(self.target_pub, pv, sig):
+                        if not verify_payload_signature(pub_key, pv, sig):
                             text = "[⚠️ INVALID SIG] " + text
-
+                    else:
+                        text = "[⚠️ NO SIG/TARGET PUB] " + text
                     self._add_bubble(sender, ts, text, sender == self.auth.username)
                 except: continue
         except Exception as e:
@@ -1053,7 +1055,9 @@ class ChatScreen(QWidget):
         self.msg_input.clear()
 
         try:
-            ct, aes = encrypt_chat_payload(self.auth.username, self.target_name, text, self.auth.private_key)
+            ts = datetime.now(timezone.utc).isoformat()
+
+            ct, aes = encrypt_chat_payload(self.auth.username, self.target_name, text, ts, self.auth.private_key)
 
             ek_me = rsa_encrypt_key(self.auth.private_key.public_key(), aes)
             ek_them = rsa_encrypt_key(self.target_pub, aes)
@@ -1063,7 +1067,7 @@ class ChatScreen(QWidget):
                 {"encryption_key": b64e_url(ek_them), "user_id": self.target_id}
             ]
 
-            ts = datetime.now(timezone.utc).isoformat()
+
             self.api.send_message(self.auth.api_key, self.auth.user_id, self.target_id, ct, keys, ts)
 
             self._add_bubble(self.auth.username, self._fmt_ts(ts), text, True)
@@ -1112,11 +1116,11 @@ class ChatScreen(QWidget):
                     pv = dict(p)
                     pv.pop("signature", None)
                     if not verify_payload_signature(self.target_pub, pv, sig):
-                        self._add_bubble(sender, ts, "[INVALID SIGNATURE] " + text)
+                        self._add_bubble(sender, ts, "[⚠️ INVALID SIG] " + text, sender == self.auth.username)
                         new_count += 1
                         continue
 
-                self._add_bubble(sender, ts, text, False)
+                self._add_bubble(sender, ts, text, sender == self.auth.username)
                 new_count += 1
             except Exception as ex:
                 # Don't crash the poll loop; show a lightweight error
