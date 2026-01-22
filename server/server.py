@@ -227,7 +227,7 @@ async def get_authenticated_user(
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized")
     # Never get_api or invalid api key
-    if user.api_key_dk == "!" or not api_key_checker(x_api_key, user.api_key_dk):
+    if user.api_key_dk == user.username or not api_key_checker(x_api_key, user.api_key_dk):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unauthorized")
     # Not authenticated or api key expired
     if user.api_key_expires is None or user.api_key_expires < datetime.now(timezone.utc):
@@ -330,7 +330,7 @@ async def register(
     # Create user in database
     try:
         user = User(username=data.username, public_key_cert=certificate_str,
-                    api_key_dk="!")
+                    api_key_dk=data.username)
         db.add(user)
         await db.commit()
     except:
